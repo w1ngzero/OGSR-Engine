@@ -1,0 +1,62 @@
+name: Build OGSR Engine (Release x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest            # Windows Server 2022 + VS 2022 (v143) + SDK
+    timeout-minutes: 180
+    env:
+      CONFIG:  Release
+      PLATFORM: x64
+
+    steps:
+      - name: Checkout sources (with the patch)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch pinned 3rd-party deps
+        shell: cmd
+        run: |
+          Update_Components.cmd < nul
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution (Release x64)
+        shell: cmd
+        run: |
+          msbuild Engine.sln /m /t:Build ^
+            /p:Configuration=%CONFIG% ^
+            /p:Platform=%PLATFORM% ^
+            /p:PlatformShortName=%PLATFORM% ^
+            /v:minimal
+
+      - name: Report produced binaries
+        shell: cmd
+        run: |
+          echo "=== bin_%PLATFORM% ==="
+          dir /s /b bin_%PLATFORM%\*.exe bin_%PLATFORM%\*.dll 2>nul
+          echo "=== done ==="
+
+      - name: Upload artifacts (built engine)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ogsr-engine-bin-%CONFIG%-%PLATFORM%
+          path: |
+            bin_%PLATFORM%/**
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          path: '**/*.log'
+          if-no-files-found: ignore
