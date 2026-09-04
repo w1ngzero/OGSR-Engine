@@ -145,6 +145,18 @@ protected:
 
     // internal functions
     virtual CBoneData* CreateBoneData(u16 ID) { return xr_new<CBoneData>(ID); }
+
+    // Round-2 (Source skeleton import): fallback that builds `bones`/`bone_map_N`/`iRoot`
+    // from a companion Source .MDL when the OGF has no OGF_S_BONE_NAMES chunk. Returns true
+    // on success (requires psSourceSkeletonMode). See source_mdl_import.h.
+    bool LoadSourceSkeleton(const char* N);
+
+    // Round-5 (Source mesh import): attach the Source skinned mesh as this visual's geometry
+    // child. Builds a CSkeletonX_ST child from the OGF stream of TryImportSourceMesh() and
+    // replaces `children` with it (requires psSourceMeshMode). Returns true on success.
+    // See source_mdl_import.h.
+    bool LoadSourceMeshGeometry(const char* N);
+
     virtual void IBoneInstances_Create();
     virtual void IBoneInstances_Destroy();
 

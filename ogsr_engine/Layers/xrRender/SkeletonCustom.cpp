@@ -4,6 +4,7 @@
 #include "SkeletonX.h"
 #include "../../xr_3da/fmesh.h"
 #include "../../xr_3da/Render.h"
+#include "../../xr_3da/source_mdl/source_mdl_import.h"
 
 int psSkeletonUpdate = 32;
 
@@ -245,122 +246,140 @@ void CKinematics::Load(const char* N, IReader* data, const u32 dwFlags)
 
     // Load bones
     xr_vector<shared_str> L_parents;
-
-    R_ASSERT(data->find_chunk(OGF_S_BONE_NAMES));
-
     visimask.zero();
 
-    u32 dwCount = data->r_u32();
+    // Two ways to build the skeleton: the vanilla OGF path (OGF_S_BONE_NAMES) and, as a new
+    // Round-2 engine capability, importing a Source .MDL skeleton when there is no OGF skeleton.
+    const bool has_ogf_bones = data->find_chunk(OGF_S_BONE_NAMES) != 0;
 
-    bone_map_N.reserve(dwCount);
-
-    const auto bone_override_ini = RImplementation.Models->bone_override_ini;
-
-    const bool has_bones = bone_override_ini && bone_override_ini->section_exist(N);
-
-    for (; dwCount; dwCount--)
+    if (has_ogf_bones)
     {
-        string256 buf;
+        // ------------------------- vanilla OGF skeleton -------------------------
+        u32 dwCount = data->r_u32();
 
-        // Bone
-        u16 ID = static_cast<u16>(bones->size());
-        data->r_stringZ(buf, sizeof(buf));
-        _strlwr(buf);
-        CBoneData* pBone = CreateBoneData(ID);
-        pBone->name = buf;
-        pBone->child_faces.resize(children.size());
-        bones->push_back(pBone);
+        bone_map_N.reserve(dwCount);
 
-        bone_map_N.emplace(pBone->name, ID);
+        const auto bone_override_ini = RImplementation.Models->bone_override_ini;
 
-        // It's parent
-        data->r_stringZ(buf, sizeof(buf));
-        _strlwr(buf);
-        L_parents.emplace_back(buf);
+        const bool has_bones = bone_override_ini && bone_override_ini->section_exist(N);
 
-        data->r(&pBone->obb, sizeof(Fobb));
-        visimask.set(ID, true);
-    }
-
-    
-    if (has_bones)
-    {
-        for (const auto& it : bone_override_ini->r_section(N).Ordered_Data)
+        for (; dwCount; dwCount--)
         {
-            shared_str bone_nm_old = it.first;
-            shared_str bone_nm = it.second;
+            string256 buf;
 
-            u16 ID = LL_BoneID(bone_nm);
+            // Bone
+            u16 ID = static_cast<u16>(bones->size());
+            data->r_stringZ(buf, sizeof(buf));
+            _strlwr(buf);
+            CBoneData* pBone = CreateBoneData(ID);
+            pBone->name = buf;
+            pBone->child_faces.resize(children.size());
+            bones->push_back(pBone);
 
-            if (ID != BI_NONE)
+            bone_map_N.emplace(pBone->name, ID);
+
+            // It's parent
+            data->r_stringZ(buf, sizeof(buf));
+            _strlwr(buf);
+            L_parents.emplace_back(buf);
+
+            data->r(&pBone->obb, sizeof(Fobb));
+            visimask.set(ID, true);
+        }
+
+        if (has_bones)
+        {
+            for (const auto& it : bone_override_ini->r_section(N).Ordered_Data)
             {
-                bone_map_N.emplace(bone_nm_old, ID);
+                shared_str bone_nm_old = it.first;
+                shared_str bone_nm = it.second;
 
-                MsgDbg("Bone override model [%s] from [%s] to [%s]", N, bone_nm_old.c_str(), bone_nm.c_str());
-            }
-        }
-    }
+                u16 ID = LL_BoneID(bone_nm);
 
-    // Attach bones to their parents
-    iRoot = BI_NONE;
-    for (u32 i = 0; i < bones->size(); i++)
-    {
-        shared_str P = L_parents[i];
-        CBoneData* B = (*bones)[i];
-        if (!P.c_str() || !P[0])
-        {
-            // no parent - this is root bone
-            R_ASSERT(BI_NONE == iRoot);
-            iRoot = static_cast<u16>(i);
-            B->SetParentID(BI_NONE);
-            continue;
-        }
-        else
-        {
-            const u16 ID = LL_BoneID(P);
-            R_ASSERT(ID != BI_NONE);
-            (*bones)[ID]->children.push_back(B);
-            B->SetParentID(ID);
-        }
-    }
-    R_ASSERT(BI_NONE != iRoot);
-
-    // Free parents
-    L_parents.clear();
-
-    // IK data
-    if (IReader* IKD = data->open_chunk(OGF_S_IKDATA))
-    {
-        const bool fix_cop_joints = pUserData ? READ_IF_EXISTS(pUserData, r_bool, "compat", "fix_cop_joints", false) : false;
-        for (const auto& B : *bones)
-        {
-            const u16 vers = static_cast<u16>(IKD->r_u32());
-            IKD->r_stringZ(B->game_mtl_name);
-            IKD->r(&B->shape, sizeof(SBoneShape));
-            B->IK_data.Import(*IKD, vers);
-
-            IKD->r_fvector3(B->rotation);
-            IKD->r_fvector3(B->position);
-            B->bind_transform.setXYZi(B->rotation);
-            B->bind_transform.translate_over(B->position);
-            B->mass = IKD->r_float();
-            IKD->r_fvector3(B->center_of_mass);
-
-            if (fix_cop_joints)
-            {
-                // https://bitbucket.org/stalker/xray_re-tools/commits/209b9014129ceeb7d92375a77f60835553266bf1
-                for (auto& it : B->IK_data.limits)
+                if (ID != BI_NONE)
                 {
-                    const Fvector2 vec = it.limit;
-                    const float tmp = vec.x;
-                    it.limit.x = -vec.y;
-                    it.limit.y = -tmp;
+                    bone_map_N.emplace(bone_nm_old, ID);
+
+                    MsgDbg("Bone override model [%s] from [%s] to [%s]", N, bone_nm_old.c_str(), bone_nm.c_str());
                 }
             }
         }
-        // calculate model to bone converting matrix
-        (*bones)[LL_GetBoneRoot()]->CalculateM2B(Fidentity);
-        IKD->close();
+
+        // Attach bones to their parents
+        iRoot = BI_NONE;
+        for (u32 i = 0; i < bones->size(); i++)
+        {
+            shared_str P = L_parents[i];
+            CBoneData* B = (*bones)[i];
+            if (!P.c_str() || !P[0])
+            {
+                // no parent - this is root bone
+                R_ASSERT(BI_NONE == iRoot);
+                iRoot = static_cast<u16>(i);
+                B->SetParentID(BI_NONE);
+                continue;
+            }
+            else
+            {
+                const u16 ID = LL_BoneID(P);
+                R_ASSERT(ID != BI_NONE);
+                (*bones)[ID]->children.push_back(B);
+                B->SetParentID(ID);
+            }
+        }
+        R_ASSERT(BI_NONE != iRoot);
+
+        // Free parents
+        L_parents.clear();
+
+        // IK data
+        if (IReader* IKD = data->open_chunk(OGF_S_IKDATA))
+        {
+            const bool fix_cop_joints = pUserData ? READ_IF_EXISTS(pUserData, r_bool, "compat", "fix_cop_joints", false) : false;
+            for (const auto& B : *bones)
+            {
+                const u16 vers = static_cast<u16>(IKD->r_u32());
+                IKD->r_stringZ(B->game_mtl_name);
+                IKD->r(&B->shape, sizeof(SBoneShape));
+                B->IK_data.Import(*IKD, vers);
+
+                IKD->r_fvector3(B->rotation);
+                IKD->r_fvector3(B->position);
+                B->bind_transform.setXYZi(B->rotation);
+                B->bind_transform.translate_over(B->position);
+                B->mass = IKD->r_float();
+                IKD->r_fvector3(B->center_of_mass);
+
+                if (fix_cop_joints)
+                {
+                    // https://bitbucket.org/stalker/xray_re-tools/commits/209b9014129ceeb7d92375a77f60835553266bf1
+                    for (auto& it : B->IK_data.limits)
+                    {
+                        const Fvector2 vec = it.limit;
+                        const float tmp = vec.x;
+                        it.limit.x = -vec.y;
+                        it.limit.y = -tmp;
+                    }
+                }
+            }
+            // calculate model to bone converting matrix
+            (*bones)[LL_GetBoneRoot()]->CalculateM2B(Fidentity);
+            IKD->close();
+        }
+    }
+    else if (SourceMdl::psSourceSkeletonMode && LoadSourceSkeleton(N))
+    {
+        // ------------------------- Source .MDL skeleton (new) -------------------------
+        // `bones`, `bone_map_N` and `iRoot` are filled by LoadSourceSkeleton(), and the
+        // model->bone (m2b) transforms were computed in the adapter. Attach the Source skinned
+        // mesh as this visual's geometry child (Round-5, requires psSourceMeshMode).
+        Msg("[SourceSkeleton] imported skeleton for '%s' (%d bone(s))", N, (int)bones->size());
+        if (SourceMdl::psSourceMeshMode && !LoadSourceMeshGeometry(N))
+            Msg("!! [SourceMesh] could not attach geometry for '%s' (mesh import failed)", N);
+    }
+    else
+    {
+        R_ASSERT2(has_ogf_bones, "Model has no X-Ray skeleton (OGF_S_BONE_NAMES) and Source skeleton import is off or failed.");
     }
 
     // after load process
@@ -391,6 +410,82 @@ void CKinematics::Load(const char* N, IReader* data, const u32 dwFlags)
     wm_frame = static_cast<u32>(-1);
 
     LL_Validate();
+}
+
+bool CKinematics::LoadSourceSkeleton(const char* N)
+{
+    // Build a fresh bones vector via the Source importer, then adopt it into this visual.
+    vecBones* src = xr_new<vecBones>();
+    int root = -1;
+    if (!SourceMdl::TryImportSourceSkeleton(N, *src, root))
+    {
+        xr_delete(src);
+        return false;
+    }
+
+    xr_delete(bones);
+    bones = src;
+
+    iRoot = (root == -1) ? BI_NONE : static_cast<u16>(root);
+    bone_map_N.clear();
+    bone_map_N.reserve(bones->size());
+    for (u32 i = 0; i < bones->size(); ++i)
+    {
+        bone_map_N.emplace((*bones)[i]->name, static_cast<u16>(i));
+        visimask.set(static_cast<u16>(i), true); // keep every imported bone visible for rendering
+    }
+
+    return true;
+}
+
+bool CKinematics::LoadSourceMeshGeometry(const char* N)
+{
+    SourceMdl::SourceMeshImport imp;
+    if (!SourceMdl::TryImportSourceMesh(N, imp) || !imp.loaded)
+        return false;
+
+    // Материал для Source-меша: OGSR-шейдер/текстура. Значения по умолчанию — заглушка; для
+    // реального рендера нужен валидный set модели (см. GetCachedModelShader). Константы ниже
+    // специально вынесены, чтобы их было легко поправить без поиска по коду.
+    static const char* const sSourceMeshTexture = "models\\hands\\c_hands"; // вспомогательное имя
+    static const char* const sSourceMeshShader = "default";                 // <- подбери валидный
+
+    std::vector<std::uint8_t> ogf;
+    if (!SourceMdl::BuildSourceMeshOGFStream(imp, sSourceMeshTexture, sSourceMeshShader, ogf) ||
+        ogf.empty())
+    {
+        Msg("!! [SourceMesh] failed to serialize OGF stream for '%s'", N);
+        return false;
+    }
+
+    // Синтетический ридер над потоком OGF (заголовок + геометрия) -> создаём CSkeletonX_ST.
+    IReader* R = xr_new<CTempReader>(ogf.data(), ogf.size(), 0);
+
+    // Уникальное имя дочернего визуала (чтобы не столкнуться с кэшем экземпляров по имени модели).
+    string_path child_name;
+    const char* base = N;
+    if (strext(base))
+        strncpy_s(child_name, base, strext(base) - base); // без расширения
+    else
+        xr_strcpy_s(child_name, base);
+    xr_strcat_s(child_name, "_smesh");
+
+    dxRender_Visual* child = smart_cast<dxRender_Visual*>(RImplementation.model_CreateChild(child_name, R));
+    xr_delete(R);
+    if (!child)
+    {
+        Msg("!! [SourceMesh] model_CreateChild failed for '%s'", N);
+        return false;
+    }
+    // Прежняя геометрия: у Source-заглушки детей нет, но на всякий случай освобождаем.
+    for (dxRender_Visual* c : children)
+        if (c)
+            c->Release();
+    children.clear();
+    children.push_back(child);
+
+    Msg("[SourceMesh] attached %d verts / %u tris to '%s'", (int)imp.verts.size(), imp.numTriangles, N);
+    return true;
 }
 
 IC void iBuildGroups(CBoneData* B, U16Vec& tgt, u16 id, u16& last_id)

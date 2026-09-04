@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -197,6 +197,20 @@
     <ClInclude Include="cf_dynamic_mesh.h" />
     <ClInclude Include="IPhysicsDefinitions.h" />
     <ClInclude Include="bone.h" />
+    <ClInclude Include="source_mdl\source_mdl_skeleton.h" />
+    <ClInclude Include="source_mdl\source_mdl_to_xray.h" />
+    <ClInclude Include="source_mdl\source_mdl_import.h" />
+    <ClInclude Include="source_mdl\source_mdl_basis.h" />
+    <ClInclude Include="source_mdl\source_mdl_basis_xray.h" />
+    <ClInclude Include="source_mdl\source_mdl_mesh.h" />
+    <ClInclude Include="source_mdl\source_mdl_mesh_read.h" />
+    <ClInclude Include="source_mdl\source_mdl_mesh_to_xray.h" />
+    <ClInclude Include="source_mdl\source_mdl_anim.h" />
+    <ClInclude Include="source_mdl\source_mdl_anim_q.h" />
+    <ClInclude Include="source_mdl\source_mdl_anim_to_xray.h" />
+    <ClInclude Include="source_mdl\source_mdl_vvd.h" />
+    <ClInclude Include="source_mdl\source_mdl_vtx.h" />
+    <ClInclude Include="source_mdl\source_mdl_split_mesh.h" />
     <ClInclude Include="..\xrParticles\psystem.h" />
     <ClInclude Include="defines.h" />
     <ClInclude Include="DiscordRPC.hpp" />
@@ -279,6 +293,20 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="bone.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_skeleton.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_to_xray.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_import.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_basis.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_mesh.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_mesh_read.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_mesh_to_xray.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_anim.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_anim_to_xray.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_anim_decode.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_mesh_ogf.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_vvd.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_vtx.cpp" />
+    <ClCompile Include="source_mdl\source_mdl_split_mesh.cpp" />
     <ClCompile Include="cf_dynamic_mesh.cpp" />
     <ClCompile Include="defines.cpp" />
     <ClCompile Include="DiscordRPC.cpp" />

@@ -103,6 +103,9 @@ constexpr xr_token qsun_quality_token[] = {{"st_opt_low", 0},
 
 // Common
 extern int psSkeletonUpdate;
+// Source .MDL skeleton import (Round-2 engine capability): 0 = off (default), 1 = on.
+extern int psSourceSkeletonMode;
+extern int psSourceMeshMode;
 extern float r__dtex_range;
 
 Fvector3 ps_r_taa_jitter{};
@@ -642,6 +645,8 @@ void xrRender_initconsole()
     CMD3(CCC_Preset, "_preset", &ps_preset, qpreset_token);
 
     CMD4(CCC_Integer, "rs_skeleton_update", &psSkeletonUpdate, 2, 128);
+    CMD4(CCC_Integer, "rs_source_skeleton", &psSourceSkeletonMode, 0, 1);
+    CMD4(CCC_Integer, "rs_source_mesh", &psSourceMeshMode, 0, 1);
 
 #ifdef DEBUG
     CMD1(CCC_DumpResources, "dump_resources");
