@@ -5,6 +5,7 @@
 #include "../../xr_3da/fmesh.h"
 #include "../../xr_3da/Render.h"
 #include "../../xr_3da/source_mdl/source_mdl_import.h"
+#include "../../xrCore/fs_internal.h" // CTempReader
 
 int psSkeletonUpdate = 32;
 
@@ -462,13 +463,14 @@ bool CKinematics::LoadSourceMeshGeometry(const char* N)
     IReader* R = xr_new<CTempReader>(ogf.data(), ogf.size(), 0);
 
     // Уникальное имя дочернего визуала (чтобы не столкнуться с кэшем экземпляров по имени модели).
-    string_path child_name;
-    const char* base = N;
-    if (strext(base))
-        strncpy_s(child_name, base, strext(base) - base); // без расширения
-    else
-        xr_strcpy_s(child_name, base);
-    xr_strcat_s(child_name, "_smesh");
+    string_path child_name;                                // путь к child-визуалу (имя_без.расширения + "_smesh")
+    const char* ext = strext(N);
+    u32 name_len = ext ? static_cast<u32>(ext - N) : static_cast<u32>(strlen(N));
+    if (name_len > sizeof(child_name) - 8)                 // оставить место под "_smesh" и 0
+        name_len = static_cast<u32>(sizeof(child_name)) - 8;
+    strncpy_s(child_name, sizeof(child_name), N, name_len); // без расширения
+    child_name[name_len] = 0;
+    strcat_s(child_name, "_smesh");
 
     dxRender_Visual* child = smart_cast<dxRender_Visual*>(RImplementation.model_CreateChild(child_name, R));
     xr_delete(R);
