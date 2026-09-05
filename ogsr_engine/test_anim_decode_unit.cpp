@@ -1,71 +1,89 @@
-#pragma once
+#include "stdafx.h"
 //--------------------------------------------------------------------------------------------------
-// source_mdl_vvd.h — читатель .vvd (vertex file) build-файла Source (split-формат вертика).
-//
-// В split-формате (Source 2013 / Garry's Mod, v48+) геометрия модели не в .mdl, а в отдельном
-// файле вершин (.vvd) и оптимизированных индексов (.vtx). .vvd хранит mstudiovertex_t:
-//   позиция(3f) + нормаль(3f) + тангенс(4f, xyz+Ориентация) + uv(2f) = 48 байт.
-//
-// ПОДТВЕРЖДЕНО на реальном gfl2_asteria_arms.vvd (см. VERIFICATION.md):
-//   id=0x56534449, version=4, numLODs=1, numLODVertexes[0]=12487,
-//   vertexDataStart=64, stride=48, конец вершин == tangentDataStart (зазор 0).
-//
-// Здесь (чистый, без движка) разбирается только массив вершин (.vvd) — веса костей и индексы
-// лежат в .vtx (отдельный модуль). Позиции/нормали возвращаются как есть (координаты Source);
-// преобразование в X-Ray (базис + упаковка в vertBoned4W) делается в движковом адаптере.
-//
-// ВАЖНО про раскладку вершины (подтверждено в VERIFICATION.md на реальном gfl2_asteria_arms.vvd):
-//   это НЕ канонический обратномобильный mstudiovertex_t (pos|normal|...). Здесь строка из
-//   48 байт устроена так:
-//     [ 0..15]  const float[4]   (обычно (1,0,0,0); не геометрия)
-//     [16..27]  position         (совпадает с bbox модели: x±26, y −6..4, z −24..0.6)
-//     [28..39]  normal           (единичная: |N| = 1.0000 для всех 12487 вершин)
-//     [40..47]  uv               (0..1)
-//   Смещения выносятся в VVD_LAYOUT, чтобы их можно было скорректировать для другого файла.
+// source_mdl_vvd.cpp — реализация читателя .vvd (см. source_mdl_vvd.h).
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_mesh.h" // для Vec3f (из базиса)
-#include <cstdint>
-#include <vector>
+#include "source_mdl_vvd.h"
+#include <cstring>
 
 namespace SourceMdl
 {
-struct VVD_VERTEX
+namespace
 {
-    Vec3f pos;
-    Vec3f normal;
-    float u, v;
-};
+template <typename T>
+bool ReadAt(const std::uint8_t* base, std::size_t size, std::size_t off, T& out)
+{
+    if (off + sizeof(T) > size)
+        return false;
+    std::memcpy(&out, base + off, sizeof(T));
+    return true;
+}
+bool InRange(std::size_t off, std::size_t n, std::size_t size)
+{
+    return off <= size && n <= size - off;
+}
+} // namespace
 
-enum class EVVDResult
+const char* VvdResultName(EVVDResult r)
 {
-    Ok = 0,
-    NotVVD,
-    UnsupportedVersion,
-    MalformedBuffer,
-};
-
-struct VVD_LAYOUT
-{
-    int id_off;             // 0
-    int version_off;        // 4
-    int numlods_off;        // 12
-    int nlverts_off;        // 16 (numLODVertexes[0])
-    int vstart_off;         // 56
-    int tstart_off;         // 60
-    int vert_stride;        // sizeof(vertex)
-    int pos_off;            // байтовое смещение позиции внутри вершины
-    int normal_off;         // байтовое смещение нормали
-    int uv_off;             // байтовое смещение UV (два float)
-};
-
-inline VVD_LAYOUT DefaultVvdLayout()
-{
-    // Подтверждено на реальном v49/GMod: stride 48, pos@16, normal@28, uv@40.
-    return VVD_LAYOUT{0, 4, 12, 16, 56, 60, 48, 16, 28, 40};
+    switch (r)
+    {
+    case EVVDResult::Ok: return "ok";
+    case EVVDResult::NotVVD: return "not a .vvd (bad id)";
+    case EVVDResult::UnsupportedVersion: return "unsupported version";
+    case EVVDResult::MalformedBuffer: return "buffer out of range";
+    }
+    return "?";
 }
 
-// Читает вершины из .vvd. outVerts заполняется по LOD(0). Возвращает результат.
 EVVDResult ReadVvdVertices(const void* data, std::size_t size, std::vector<VVD_VERTEX>& outVerts,
-                           const VVD_LAYOUT& layout = DefaultVvdLayout());
-const char* VvdResultName(EVVDResult r);
+                           const VVD_LAYOUT& L)
+{
+    outVerts.clear();
+    if (!data || size < 64)
+        return EVVDResult::MalformedBuffer;
+
+    const std::uint8_t* base = static_cast<const std::uint8_t*>(data);
+
+    std::uint32_t id = 0, version = 0;
+    if (!ReadAt(base, size, static_cast<std::size_t>(L.id_off), id) ||
+        !ReadAt(base, size, static_cast<std::size_t>(L.version_off), version))
+        return EVVDResult::MalformedBuffer;
+
+    // MODEL_VERTEX_FILE_ID = 'IDVS' (байты 49 44 56 53) as u32 = 0x53564449/0x... ;
+    // на реальном файле прочитано 0x56534449 ('VSID'... уточнено). В VERIFICATION.md:
+    // id = 0x56534449.
+    if (id != 0x56534449u)
+        return EVVDResult::NotVVD;
+    if (version != 4)
+        return EVVDResult::UnsupportedVersion;
+
+    std::int32_t numlods = 0, nlverts0 = 0, vstart = 0;
+    if (!ReadAt(base, size, static_cast<std::size_t>(L.numlods_off), numlods) ||
+        !ReadAt(base, size, static_cast<std::size_t>(L.nlverts_off), nlverts0) ||
+        !ReadAt(base, size, static_cast<std::size_t>(L.vstart_off), vstart))
+        return EVVDResult::MalformedBuffer;
+
+    if (nlverts0 <= 0 || vstart < 0)
+        return EVVDResult::MalformedBuffer;
+
+    const std::size_t stride = static_cast<std::size_t>(L.vert_stride);
+    const std::size_t n = static_cast<std::size_t>(nlverts0);
+    if (!InRange(static_cast<std::size_t>(vstart), n * stride, size))
+        return EVVDResult::MalformedBuffer;
+
+    outVerts.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const std::size_t vo = static_cast<std::size_t>(vstart) + i * stride;
+        VVD_VERTEX v{};
+        // Раскладка подтверждена на реальном файле: pos@L.pos_off, normal@L.normal_off, uv@L.uv_off
+        // (первые 16 байт — константа, не геометрия). Оффсеты параметризуемы через VVD_LAYOUT.
+        std::memcpy(&v.pos, base + vo + static_cast<std::size_t>(L.pos_off), 12);
+        std::memcpy(&v.normal, base + vo + static_cast<std::size_t>(L.normal_off), 12);
+        std::memcpy(&v.u, base + vo + static_cast<std::size_t>(L.uv_off), 4);
+        std::memcpy(&v.v, base + vo + static_cast<std::size_t>(L.uv_off) + 4, 4);
+        outVerts.push_back(v);
+    }
+    return EVVDResult::Ok;
+}
 } // namespace SourceMdl

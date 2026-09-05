@@ -1,99 +1,75 @@
 //--------------------------------------------------------------------------------------------------
-// test_anim_real.cpp — проверка декодирования RAWROT2 (Quaternion64) в реальные кадры.
-//
-// Извлекает байтовый канал RAWROT2 напрямую из .mdl и декодирует его в кватернион,
-// проверяя что |q| == 1 (единичный). Также показывает, что кадры последовательности,
-// заполненные читателем (source_mdl_anim.cpp), совпадают с этим кватернионом.
+// test_anim_decode_unit.cpp — known-answer тесты распаковки RAW-каналов (без реального ассета).
+//   g++ -std=c++17 -O2 -o test_anim_decode_unit test_anim_decode_unit.cpp source_mdl_anim_decode.cpp
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_anim.h"
 #include "source_mdl_anim_decode.h"
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <cmath>
-#include <vector>
-#include <string>
+#include <cstdint>
 
-enum { kLastAnimCount = 1, kNewAnimCount = 3 };
+using namespace SourceMdl;
 
-bool ReadAt(const unsigned char* b, size_t size, size_t off, void* out, size_t n)
+static int g_fail = 0;
+
+static void check(bool ok, const char* msg)
 {
-    if (off + n > size) return false;
-    std::memcpy(out, b + off, n);
-    return true;
+    std::printf("  [%s] %s\n", ok ? "ok" : "FAIL", msg);
+    if (!ok) g_fail++;
 }
 
-int main(int argc, char** argv)
+int main()
 {
-    if (argc < 2)
+    std::printf("== Quaternion64 (RAWROT2) ==\n");
+    // Реальные байты gfl2_asteria_arms.mdl bone0 RAWROT2 (проверены на ассете):
+    //   decode -> q=(-0.54267,-0.45334,-0.45334,0.54267), |q|=1
     {
-        std::printf("usage: %s <model.mdl>\n", argv[0]);
-        return 2;
+        const std::uint8_t raw[8] = {0x3e, 0x51, 0x67, 0xe4, 0x17, 0x8d, 0xfc, 0x22};
+        AnimQ::Quat4 q;
+        check(DecodeQuaternion64(raw, q), "decodable");
+        const float n = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        char buf[128];
+        std::snprintf(buf, sizeof buf, "|q|==1 (got %.5f)", n);
+        check(std::fabs(n - 1.0f) < 1e-4f, buf);
+        std::snprintf(buf, sizeof buf, "x~-0.54267 (got %.5f)", q.x);
+        check(std::fabs(q.x - (-0.54267f)) < 1e-3f, buf);
+        std::snprintf(buf, sizeof buf, "w~0.54267 (got %.5f)", q.w);
+        check(std::fabs(q.w - 0.54267f) < 1e-3f, buf);
     }
-    FILE* f = std::fopen(argv[1], "rb");
-    if (!f) return 2;
-    std::fseek(f, 0, SEEK_END); long sz = std::ftell(f); std::fseek(f, 0, SEEK_SET);
-    std::vector<unsigned char> b((size_t)sz);
-    if (std::fread(b.data(), 1, (size_t)sz, f) != (size_t)sz) return 2;
-    std::fclose(f);
-    const size_t N = b.size();
-
-    std::printf("mdl size = %zu\n", N);
-
-    // Прочитаем через читатель анимаций (v49) уже заполненные кадры.
-    std::vector<SourceMdl::ANIM_SEQ> seqs;
-    SourceMdl::EAnimResult r = SourceMdl::ReadSourceAnims(b.data(), N, seqs, SourceMdl::V49AnimLayout(), 49);
-    std::printf("reader: %s (seqs=%d)\n", SourceMdl::AnimResultName(r), (int)seqs.size());
-    if (r != SourceMdl::EAnimResult::Ok)
-        return 2;
-
-    // Каналы RAWROT2 на 14224 (v49, animindex=108 от базы 14116).
-    const std::size_t animCh = 14224;
-    std::printf("anim channel at %zu: bone=%d flags=0x%02x\n", animCh, b[animCh], b[animCh + 1]);
-    const std::uint8_t* raw = &b[animCh + 4]; // после mstudioanim_t {bone,flags,nextoffset}
-
-    SourceMdl::AnimQ::Quat4 q;
-    if (!SourceMdl::DecodeQuaternion64(raw, q))
+    // Знаковый бит w: установленный старший бит должен дать отрицательный w (норма проверяется).
     {
-        std::printf("decoder FAIL\n");
-        return 2;
-    }
-    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    std::printf("decoded q=(%.5f,%.5f,%.5f,%.5f) |q|=%.5f\n", q.x, q.y, q.z, q.w, n);
-    if (std::fabs(n - 1.0f) > 0.005f)
-    {
-        std::printf("FAIL: |q| != 1\n");
-        return 2;
-    }
-    const bool nonIdentity = std::fabs(q.x) > 1e-4f || std::fabs(q.y) > 1e-4f || std::fabs(q.z) > 1e-4f ||
-                             std::fabs(q.w - 1.0f) > 1e-4f;
-    std::printf("non-identity rotation: %s\n", nonIdentity ? "yes" : "no (identity)");
-
-    // Сверка с кадрами читателя (bone0, оба кадра == q).
-    if (seqs.empty() || seqs[0].tracks.empty())
-    {
-        std::printf("FAIL: no tracks\n");
-        return 2;
-    }
-    const auto& tr = seqs[0].tracks[0];
-    if (tr.bone != 0)
-    {
-        std::printf("FAIL: track bone=%d (expected 0)\n", tr.bone);
-        return 2;
-    }
-    std::printf("reader frames for bone0 = %d (seq.numframes=%d)\n", (int)tr.frames.size(), seqs[0].numframes);
-    for (std::size_t i = 0; i < tr.frames.size(); ++i)
-    {
-        const auto& fq = tr.frames[i].rot;
-        const float d = std::fabs(fq.x - q.x) + std::fabs(fq.y - q.y) + std::fabs(fq.z - q.z) + std::fabs(fq.w - q.w);
-        std::printf("  frame %zu: q=(%.5f,%.5f,%.5f,%.5f) diff=%.6f\n", i, fq.x, fq.y, fq.z, fq.w, d);
-        if (d > 0.01f)
-        {
-            std::printf("FAIL: frame != decoded q\n");
-            return 2;
-        }
+        std::uint8_t raw[8] = {0x3e, 0x51, 0x67, 0xe4, 0x17, 0x8d, 0xfc, 0x22};
+        raw[7] |= 0x80; // wneg=1
+        AnimQ::Quat4 q;
+        check(DecodeQuaternion64(raw, q) && q.w < 0.0f, "wneg flips w sign");
+        const float n = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        check(std::fabs(n - 1.0f) < 1e-3f, "wneg keeps |q|==1");
     }
 
-    std::printf("ALL ANIM DECODE CHECKS PASSED\n");
-    return 0;
+    std::printf("== Quaternion48 (RAWROT) ==\n");
+    {
+        // identity ~ (0,0,0,1)
+        const std::int16_t q48[3] = {0, 0, 0};
+        AnimQ::Quat4 q;
+        check(DecodeQuaternion48(q48, q) && std::fabs(q.w - 1.0f) < 1e-3f, "zero -> w=1 (identity)");
+        const float n = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        check(std::fabs(n - 1.0f) < 1e-3f, "|q|==1");
+        // 0.5,0.5,0.5 -> w2 = 1-0.75 = 0.25 -> w=0.5
+        const std::int16_t q48b[3] = {16384, 16384, 16384};
+        check(DecodeQuaternion48(q48b, q) && std::fabs(q.x - 0.5f) < 0.01f && std::fabs(q.w - 0.5f) < 0.01f,
+              "0.5,0.5,0.5 -> w=0.5");
+    }
+
+    std::printf("== Vector48 (RAWPOS) ==\n");
+    {
+        const std::int16_t p[3] = {16384, -8192, 8192};
+        const AnimQ::Vec3 v = DecodeVector48(p);
+        check(std::fabs(v.x - 0.5f) < 1e-3f && std::fabs(v.y + 0.25f) < 1e-3f && std::fabs(v.z - 0.25f) < 1e-3f,
+              "16384,-8192,8192 -> (0.5,-0.25,0.25)");
+    }
+
+    if (g_fail == 0)
+        std::printf("ALL ANIM DECODE UNIT TESTS PASSED\n");
+    else
+        std::printf("%d FAILURE(S)\n", g_fail);
+    return g_fail ? 1 : 0;
 }

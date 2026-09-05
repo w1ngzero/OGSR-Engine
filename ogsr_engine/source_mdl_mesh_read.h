@@ -1,66 +1,59 @@
-#pragma once
+#include "stdafx.h"
 //--------------------------------------------------------------------------------------------------
-// source_mdl_mesh.h — Чистый (без движка) читатель/конвертер вершин меша Source .MDL -> X-Ray.
-//
-// ОБЪЁМ РАУНДА 3 (и честное про что это пока НЕ охватывает):
-//   РАЗОБРАНО:   вершины (позиция, нормаль, UV) + костные веса/bone-индексы, нормализация весов,
-//                применение общего базиса (source_mdl_basis.h), упаковка в X-Ray-вершину,
-//                и синтаксический разбор классического ВСТРОЕННОГО (inline) формата вершин .mdl.
-//   ПОКА НЕ:     современный "split" формат вершин Source v48+/GMod, где геометрия лежит в
-//                ОТДЕЛЬНОМ файле (MODEL_VERTEX_FILE_ID + fixup-таблица) — это отдельный
-//                большой и хрупкий под-модуль (нужен реальный .mdl/.vtx для проверки смещений).
-//                Об этом явно сказано в README; при numbodyparts/указателях на блочные данные,
-//                указывающих в split-файл, парсер сообщает "не поддерживается".
-//
-//   Важное о версиях: классический inline-формат вершины устойчив, но ПОЛЯ studiohdr_t и
-//   вложенные записи имеют СМЕЩЕНИЯ, зависящие от версии. Чтобы не зашивать неверные числа,
-//   парсер принимает таблицу CLASSIC_LAYOUT (см. source_mdl_mesh_layout.h). Выбор реальных
-//   значений под конкретный ассет и верификация против реальной модели — следующий шаг (см. README).
+// source_mdl_mesh.cpp -- реализация чистой части меш-модуля (см. source_mdl_mesh.h).
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_basis.h"
-#include <vector>
-#include <string>
-#include <cstdint>
+#include "source_mdl_mesh.h"
 
 namespace SourceMdl
 {
-// Классическая (inline) вершина: до 3 весов (Source) + позиция/нормаль/UV.
-struct MESH_VERTEX
+int NormalizeWeights(float weight[4], int bone[4], int in_count)
 {
-    Vec3f pos;
-    Vec3f normal;
-    float u, v;
+    if (in_count < 1)
+        return 0;
 
-    // Исходные (Source) веса/индексы. weights[i] в [0..255], но для классики трактуем как
-    // долю w/255; честная нормализация выполняется в NormalizeWeights().
-    float weight[3];
-    int bone[3];   // индекс кости или -1 (статичная/неиспользуемая)
-    int num_weights;
-};
+    if (in_count > 4)
+        in_count = 4;
 
-// Один треугольник меша (ссылки на индексы вершин, локально в пределах меша).
-struct MESH_TRIANGLE
+    float sum = 0.f;
+    for (int i = 0; i < in_count; ++i)
+        sum += weight[i];
+
+    if (sum <= 0.f)
+    {
+        // Нет корректных весов — привязываем всё к первой кости.
+        for (int i = 0; i < in_count; ++i)
+        {
+            weight[i] = (i == 0) ? 1.f : 0.f;
+            if (bone[i] < 0)
+                bone[i] = 0;
+        }
+        return 1;
+    }
+
+    for (int i = 0; i < in_count; ++i)
+        weight[i] /= sum;
+
+    return in_count;
+}
+
+void ApplyBasisToVertex(const Basis3& basis, Vec3f& pos, Vec3f& normal)
 {
-    std::uint32_t a, b, c;
-};
+    pos = Transform(basis, pos);
+    normal = Transform(basis, normal);
+    // det == +1 -> не нужно менять знак нормали; при переходе на рефлексию (det<0)
+    // здесь пришлось бы делать normal *= -1 и реверсить треугольники.
+}
 
-// Разобранный меш: обычно один mstudiomesh_t классического .mdl.
-struct MESH
+bool BuildTriangles(const std::uint32_t* indices, std::size_t count, MESH& out)
 {
-    std::vector<MESH_VERTEX> vertices;
-    std::vector<MESH_TRIANGLE> triangles;
-};
-
-// Нормализует веса до суммы 1.0, обрезает до 4 влияний (X-Ray поддерживает до 4),
-// оставляет пустой слот для 4-го веса если нужно. Возвращает фактическое число влияний (1..4).
-int NormalizeWeights(float weight[4], int bone[4], int in_count);
-
-// Применяет базис к позиции и нормали (нормаль переводится как вектор, без трансляции).
-void ApplyBasisToVertex(const Basis3& basis, Vec3f& pos, Vec3f& normal);
-
-// Заполняет triangle-список из набора индексов (по 3 на треугольник) с проверкой диапазона.
-bool BuildTriangles(const std::uint32_t* indices, std::size_t count, MESH& out);
-
-// ВАЖНО про winding: применяемый базис имеет det == +1 (чистый поворот), поэтому реверс
-// порядка вершин в треугольнике НЕ нужен. Проверяется через RequiresWindingOrNormalFlip().
+    if (!indices || count % 3 != 0)
+        return false;
+    out.triangles.reserve(out.triangles.size() + count / 3);
+    for (std::size_t i = 0; i < count; i += 3)
+    {
+        const std::uint32_t a = indices[i], b = indices[i + 1], c = indices[i + 2];
+        out.triangles.push_back({a, b, c});
+    }
+    return true;
+}
 } // namespace SourceMdl

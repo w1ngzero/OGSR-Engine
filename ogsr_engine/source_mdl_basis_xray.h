@@ -1,117 +1,97 @@
+#pragma once
 //--------------------------------------------------------------------------------------------------
-// source_mdl_anim_to_xray.cpp — движковый адаптер Source-анимации -> X-Ray CMotion.
+// source_mdl_anim_q.h — КВАНТОВАНИЕ анимации в X-Ray (чистое, без движка, тестируемое).
+//
+// X-Ray хранит скелетную анимацию в виде квантованных ключей (см. Layers/xrRender/
+// AnimationKeyCalculate.h и xr_3da/SkeletonMotions.h):
+//   * поворот:  CKeyQR = 4 x s16 (x,y,z,w).  Декодирование:  Q.c = s16 / KEY_Quant (=32767).
+//   * сдвиг:    CKeyQT8 (3 x s8) или CKeyQT16 (3 x s16).
+//               Декодирование:  T.c = s16 * _sizeT.c + _initT.c.
+//   * SAMPLE_FPS = 30  =>  кадры идут с шагом 1/30 с.
+//
+// Этот модуль — ровно обратная (квантующая) сторона той же математики, поэтому проверяется
+// на round-trip (квантовать -> декодировать == исходному). Используется адаптером
+// source_mdl_anim_to_xray.cpp для заполнения CMotion (через типы int16, которые совпадают
+// с CKeyQR / CKeyQT8 / CKeyQT16).
 //--------------------------------------------------------------------------------------------------
-#include "stdafx.h"
-#include "source_mdl_anim_to_xray.h"
-#include "source_mdl_anim_q.h"
+#include <cstdint>
+#include <cmath>
+#include <vector>
 
 namespace SourceMdl
 {
-bool BuildXRayMotion(const ANIM_TRACK& track, CMotion& motion, bool doRotation,
-                     bool doTranslation, bool useT16)
+namespace AnimQ
 {
-    if (track.frames.empty())
-        return false;
+constexpr float kKeyQuant = 32767.f;         // == X-Ray KEY_Quant
+constexpr float kKeyQuantI = 1.f / kKeyQuant; // == X-Ray KEY_QuantI
+constexpr float kSampleFPS = 30.f;           // == X-Ray SAMPLE_FPS
 
-    const int n = static_cast<int>(track.frames.size());
-    motion.set_count(n);
+struct Quat4 { float x, y, z, w; };
+struct Vec3 { float x, y, z; };
 
-    // ---- флаги ----
-    motion.set_flags(0);
-    if (!doRotation)
-        motion.set_flag(flRKeyAbsent, TRUE);
-    if (doTranslation)
-    {
-        motion.set_flag(flTKeyPresent, TRUE);
-        if (useT16)
-            motion.set_flag(flTKey16IsBit, TRUE);
-    }
-
-    // ---- появление ключей в заданных порядках ----
-    std::vector<CKeyQR> rotKeys(n);
-    std::vector<CKeyQT16> t16Keys(n);
-    std::vector<CKeyQT8> t8Keys(n);
-
-    // Сначала получаем все (неквантизованные) кадры.
-    std::vector<AnimQ::Quat4> rots(n);
-    std::vector<float> poss(n * 3);
-    for (int f = 0; f < n; ++f)
-    {
-        rots[f] = track.frames[f].rot;
-        poss[f * 3 + 0] = track.frames[f].pos.x;
-        poss[f * 3 + 1] = track.frames[f].pos.y;
-        poss[f * 3 + 2] = track.frames[f].pos.z;
-    }
-
-    // ---- квантование поворотов ----
-    if (doRotation)
-    {
-        for (int f = 0; f < n; ++f)
-        {
-            int16_t q[4];
-            AnimQ::QuantizeRot(rots[f], q);
-            rotKeys[f].x = q[0]; rotKeys[f].y = q[1]; rotKeys[f].z = q[2]; rotKeys[f].w = q[3];
-        }
-        motion._keysR.create(static_cast<u32>(n), rotKeys.data());
-    }
-    else
-    {
-        // один R-ключ (первый кадр), присутствует всегда
-        int16_t q[4];
-        AnimQ::QuantizeRot(rots[0], q);
-        CKeyQR k;
-        k.x = q[0]; k.y = q[1]; k.z = q[2]; k.w = q[3];
-        motion._keysR.create(1, &k);
-    }
-
-    // ---- квантование смещений ----
-    if (doTranslation)
-    {
-        AnimQ::QuantParams p;
-        AnimQ::FitTranslationRange(poss.data(), n, useT16, p);
-        motion._sizeT.set(p.size[0], p.size[1], p.size[2]);
-        motion._initT.set(p.init[0], p.init[1], p.init[2]);
-
-        if (useT16)
-        {
-            for (int f = 0; f < n; ++f)
-            {
-                int16_t t[3];
-                AnimQ::QuantizeT(track.frames[f].pos, p, t);
-                t16Keys[f].x1 = t[0]; t16Keys[f].y1 = t[1]; t16Keys[f].z1 = t[2];
-            }
-            motion._keysT16.create(static_cast<u32>(n), t16Keys.data());
-        }
-        else
-        {
-            for (int f = 0; f < n; ++f)
-            {
-                int16_t t[3];
-                AnimQ::QuantizeT(track.frames[f].pos, p, t);
-                t8Keys[f].x1 = static_cast<s8>(t[0]); t8Keys[f].y1 = static_cast<s8>(t[1]); t8Keys[f].z1 = static_cast<s8>(t[2]);
-            }
-            motion._keysT8.create(static_cast<u32>(n), t8Keys.data());
-        }
-    }
-    else
-    {
-        motion._initT.set(track.frames[0].pos.x, track.frames[0].pos.y, track.frames[0].pos.z);
-    }
-
-    return true;
+// Квантовать поворот (компоненты уже в порядке x,y,z,w). -> 4 x s16 (как CKeyQR).
+inline void QuantizeRot(const Quat4& q, int16_t out[4])
+{
+    out[0] = static_cast<int16_t>(std::lround(q.x * kKeyQuant));
+    out[1] = static_cast<int16_t>(std::lround(q.y * kKeyQuant));
+    out[2] = static_cast<int16_t>(std::lround(q.z * kKeyQuant));
+    out[3] = static_cast<int16_t>(std::lround(q.w * kKeyQuant));
 }
 
-int BuildXRayMotions(const ANIM_SEQ& seq, std::vector<CMotion>& outMotions, bool useT16)
+// Декодировать поворот (соответствует X-Ray QR2Quat).
+inline Quat4 DequantizeRot(const int16_t in[4])
 {
-    int built = 0;
-    for (const ANIM_TRACK& tr : seq.tracks)
-    {
-        if (tr.bone >= 0 && tr.bone < static_cast<int>(outMotions.size()))
-        {
-            if (BuildXRayMotion(tr, outMotions[static_cast<std::size_t>(tr.bone)], true, !tr.frames.empty(), useT16))
-                ++built;
-        }
-    }
-    return built;
+    return {in[0] * kKeyQuantI, in[1] * kKeyQuantI, in[2] * kKeyQuantI, in[3] * kKeyQuantI};
 }
+
+// Параметры квантования сдвига (== CMotion::_sizeT / _initT).
+struct QuantParams
+{
+    float size[3]; // шаг на одну единицу отсчёта
+    float init[3]; // значение при отсчёте == 0
+};
+
+// Вычислить size/init по диапазону положений (сдвиг). t16: true -> 16-бит, false -> 8-бит.
+inline void FitTranslationRange(const float* positions, int count, bool t16, QuantParams& out)
+{
+    // count -- число кадров; positions -- массив xyz по кадрам.
+    const float half = t16 ? 32767.f : 127.f;
+    if (count <= 0 || !positions)
+    {
+        for (int c = 0; c < 3; ++c) { out.size[c] = 1.f; out.init[c] = 0.f; }
+        return;
+    }
+    float mn[3], mx[3];
+    for (int c = 0; c < 3; ++c) { mn[c] = 1e30f; mx[c] = -1e30f; }
+    for (int i = 0; i < count; ++i)
+        for (int c = 0; c < 3; ++c)
+        {
+            const float v = positions[i * 3 + c];
+            if (v < mn[c]) mn[c] = v;
+            if (v > mx[c]) mx[c] = v;
+        }
+    for (int c = 0; c < 3; ++c)
+    {
+        const float span = (mx[c] - mn[c]);
+        out.size[c] = (span > 1e-9f) ? (span / (2.f * half)) : 1e-6f;
+        out.init[c] = (mn[c] + mx[c]) * 0.5f; // середина диапазона -> отсчёт 0
+    }
+}
+
+// Квантовать один сдвиг (-> s16, как CKeyQT8 (s8) либо CKeyQT16 (s16), в зависимости от t16).
+inline void QuantizeT(const Vec3& t, const QuantParams& p, int16_t out[3])
+{
+    out[0] = static_cast<int16_t>(std::lround((t.x - p.init[0]) / p.size[0]));
+    out[1] = static_cast<int16_t>(std::lround((t.y - p.init[1]) / p.size[1]));
+    out[2] = static_cast<int16_t>(std::lround((t.z - p.init[2]) / p.size[2]));
+}
+
+// Декодировать сдвиг (соответствует X-Ray QT*_2T).
+inline Vec3 DequantizeT(const int16_t in[3], const QuantParams& p)
+{
+    return {in[0] * p.size[0] + p.init[0],
+            in[1] * p.size[1] + p.init[1],
+            in[2] * p.size[2] + p.init[2]};
+}
+} // namespace AnimQ
 } // namespace SourceMdl
