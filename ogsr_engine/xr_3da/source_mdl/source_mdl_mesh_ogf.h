@@ -1,46 +1,98 @@
-#pragma once
+#include "stdafx.h"
 //--------------------------------------------------------------------------------------------------
-// source_mdl_mesh_ogf.h -- сериализация импортированного Source-меша в OGF-контейнеры геометрии.
+// source_mdl_mesh_ogf.cpp -- сериализация скин-меша в OGF-контейнеры (чистый модуль, без DX).
 //
-// Движок создаёт видимый меш через стандартный загрузчик визуала (Fvisual::Load), который читает
-// байтовые контейнеры OGF_VERTICES (скин-вершины vertBoned4W) и OGF_INDICES (u16-индексы).
-// Чтобы импортировать Source-геометрию как нативный визуал, мы собираем именно ЭТИ байты и
-// отдаём их движку (в CKinematics — через синтетический IReader/RImplementation.model_CreateChild).
+// ФОРМАТ КОНТЕЙНЕРА (точная копия IWriter::open_chunk/close_chunk и IReader::find_chunk,
+// см. xrCore/FS.cpp):
+//     u32 id;      // тип чанка (OGF_VERTICES / OGF_INDICES)
+//     u32 size;    // размер payload в байтах
+//     <payload>
+// Содержимое:
+//   OGF_VERTICES: u32 fvf; u32 vCount;  vertBoned4W[vCount];
+//   OGF_INDICES : u32 count;            u16 index[count];
 //
-// THIS MODULE IS PURE (без движка/без DX), чтобы byte-формат можно было проверить юнит-тестом,
-// воспроизводя логику FVisual::Load (см. source_mdl_mesh_ogf.cpp-комментарии). В реальном
-// движковом коде те же байты уходят в model_CreateChild.
-//
-// Входная вершина — чистая копия полей vertBoned4W (по одной на колонку), чтобы не тянуть
-// движковые типы: x,y,z pos; nx,ny,nz normal; tx..tz tangent; bx..bz bitangent;
-// u,v uv; m[4] индексы костей; w[4] веса.
+// vertBoned4W (см. xr_3da/bone.h): { u16 m[4]; Fvector P; Fvector N; Fvector T; Fvector B;
+//                                    float w[3]; float u, v; }  = 8 + 12*4 + 12 + 8 = 76 байт.
+// Порядок и размеры полей воспроизводятся ровно так, чтобы FVisual::Load() (который читает
+// fvf/vCount, затем вершины по FVF::ComputeVertexSize(fvf)) увидел корректный поток.
 //--------------------------------------------------------------------------------------------------
-#include <cstdint>
-#include <vector>
+#include "source_mdl_mesh_ogf.h"
+
+#include <cstring>
 
 namespace SourceMdl
 {
-struct MeshOGFVertex
+namespace
 {
-    float x, y, z;     // P
-    float nx, ny, nz;  // N
-    float tx, ty, tz;  // T
-    float bx, by, bz;  // B
-    float u, v;        // uv
-    std::uint16_t m[4]; // индексы костей (4 влияния)
-    float w[4];         // веса
-};
+void Put32(std::vector<std::uint8_t>& b, std::uint32_t v)
+{
+    b.push_back(static_cast<std::uint8_t>(v & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 16) & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 24) & 0xff));
+}
+void Put16(std::vector<std::uint8_t>& b, std::uint16_t v)
+{
+    b.push_back(static_cast<std::uint8_t>(v & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+}
+void PutF32(std::vector<std::uint8_t>& b, float v)
+{
+    std::uint32_t t;
+    std::memcpy(&t, &v, 4);
+    Put32(b, t);
+}
 
-// Собирает OGF-поток из одного скин-меша: OGF_VERTICES (vertBoned4W) + OGF_INDICES (u16).
-// ВХОДЯЩИЕ данные должны уже быть в X-Ray-конвенции (basis применён, веса нормализованы,
-// кости переиндексированы) — именно такой меш даёт TryImportSourceMesh().
-//   fvf         -- FVF-код формата вершин (для vertBoned4W это OGF_VERTEXFORMAT_FVF_4L).
-//   outBuffer   -- заполняется байтами OGF-потока (по 4-байтовым контейнерам).
-// Возвращает false, если вершин/индексов нет.
+void WriteVertex(std::vector<std::uint8_t>& b, const MeshOGFVertex& v)
+{
+    // m[4] (u16)
+    Put16(b, v.m[0]); Put16(b, v.m[1]); Put16(b, v.m[2]); Put16(b, v.m[3]);
+    // P
+    PutF32(b, v.x); PutF32(b, v.y); PutF32(b, v.z);
+    // N
+    PutF32(b, v.nx); PutF32(b, v.ny); PutF32(b, v.nz);
+    // T
+    PutF32(b, v.tx); PutF32(b, v.ty); PutF32(b, v.tz);
+    // B
+    PutF32(b, v.bx); PutF32(b, v.by); PutF32(b, v.bz);
+    // w[3]
+    PutF32(b, v.w[0]); PutF32(b, v.w[1]); PutF32(b, v.w[2]);
+    // u, v
+    PutF32(b, v.u); PutF32(b, v.v);
+}
+} // namespace
+
 bool BuildSourceMeshOGF(const std::vector<MeshOGFVertex>& verts,
                         const std::vector<std::uint16_t>& indices,
-                        std::uint32_t fvf, std::vector<std::uint8_t>& outBuffer);
+                        std::uint32_t fvf, std::vector<std::uint8_t>& outBuffer)
+{
+    outBuffer.clear();
+    if (verts.empty() || indices.size() < 3)
+        return false;
 
-// Константы тех же контейнеров, что в xr_3da/fmesh.h (дублируем, чтобы модуль был чистым).
-enum { kOGF_VERTICES = 3, kOGF_INDICES = 4 };
+    // --- OGF_VERTICES ---
+    std::vector<std::uint8_t> vertsPayload;
+    Put32(vertsPayload, fvf);
+    Put32(vertsPayload, static_cast<std::uint32_t>(verts.size()));
+    for (const auto& v : verts)
+        WriteVertex(vertsPayload, v);
+
+    // --- OGF_INDICES ---
+    std::vector<std::uint8_t> idxPayload;
+    Put32(idxPayload, static_cast<std::uint32_t>(indices.size()));
+    for (const auto i : indices)
+        Put16(idxPayload, i);
+
+    // --- упаковка ---
+    outBuffer.reserve(8 + vertsPayload.size() + 8 + idxPayload.size());
+    Put32(outBuffer, static_cast<std::uint32_t>(kOGF_VERTICES));
+    Put32(outBuffer, static_cast<std::uint32_t>(vertsPayload.size()));
+    outBuffer.insert(outBuffer.end(), vertsPayload.begin(), vertsPayload.end());
+
+    Put32(outBuffer, static_cast<std::uint32_t>(kOGF_INDICES));
+    Put32(outBuffer, static_cast<std::uint32_t>(idxPayload.size()));
+    outBuffer.insert(outBuffer.end(), idxPayload.begin(), idxPayload.end());
+
+    return true;
+}
 } // namespace SourceMdl

@@ -1,51 +1,71 @@
-# Схема вшивания импортированного Source-меша в движок (черновик, ещё не реализовано)
+#pragma once
+//--------------------------------------------------------------------------------------------------
+// source_mdl_vvd.h — читатель .vvd (vertex file) build-файла Source (split-формат вертика).
+//
+// В split-формате (Source 2013 / Garry's Mod, v48+) геометрия модели не в .mdl, а в отдельном
+// файле вершин (.vvd) и оптимизированных индексов (.vtx). .vvd хранит mstudiovertex_t:
+//   позиция(3f) + нормаль(3f) + тангенс(4f, xyz+Ориентация) + uv(2f) = 48 байт.
+//
+// ПОДТВЕРЖДЕНО на реальном gfl2_asteria_arms.vvd (см. VERIFICATION.md):
+//   id=0x56534449, version=4, numLODs=1, numLODVertexes[0]=12487,
+//   vertexDataStart=64, stride=48, конец вершин == tangentDataStart (зазор 0).
+//
+// Здесь (чистый, без движка) разбирается только массив вершин (.vvd) — веса костей и индексы
+// лежат в .vtx (отдельный модуль). Позиции/нормали возвращаются как есть (координаты Source);
+// преобразование в X-Ray (базис + упаковка в vertBoned4W) делается в движковом адаптере.
+//
+// ВАЖНО про раскладку вершины (подтверждено в VERIFICATION.md на реальном gfl2_asteria_arms.vvd):
+//   это НЕ канонический обратномобильный mstudiovertex_t (pos|normal|...). Здесь строка из
+//   48 байт устроена так:
+//     [ 0..15]  const float[4]   (обычно (1,0,0,0); не геометрия)
+//     [16..27]  position         (совпадает с bbox модели: x±26, y −6..4, z −24..0.6)
+//     [28..39]  normal           (единичная: |N| = 1.0000 для всех 12487 вершин)
+//     [40..47]  uv               (0..1)
+//   Смещения выносятся в VVD_LAYOUT, чтобы их можно было скорректировать для другого файла.
+//--------------------------------------------------------------------------------------------------
+#include "source_mdl_mesh.h" // для Vec3f (из базиса)
+#include <cstdint>
+#include <vector>
 
-Цель: заставить импортированную Source-геометрию (`c_hands`) рендериться как **нативный** детский
-визуал иерархического объекта — через стандартный загрузчик `Fvisual::Load`, а не через
-самодельные DX-буферы, сшитые мимо конвейера.
+namespace SourceMdl
+{
+struct VVD_VERTEX
+{
+    Vec3f pos;
+    Vec3f normal;
+    float u, v;
+};
 
-## Что уже есть
-- `SourceMdl::TryImportSourceMesh(name, out)` → `out.verts` (`std::vector<vertBoned4W>`),
-  `out.indices` (`std::vector<u16>`), `out.boneMap` (identity), `out.sphere`, `out.loaded`,
-  `out.numTriangles`. Меш уже в X-Ray-базисе (basis применён, веса нормализованы, кости — индексы
-  движковых `CBoneData`, т.е. порядок `.mdl`).
-- `BuildSourceMeshOGF(verts, indices, fvf, outBuffer)` — сериализует этот меш в байты OGF-чанков
-  `OGF_VERTICES` (`u32 fvf; u32 vCount; vertBoned4W[]`) + `OGF_INDICES` (`u32 count; u16[]`),
-  упакованных как контейнеры `u32 id; u32 size; payload` (точно как `IWriter::open_chunk` /
-  `IReader::find_chunk`). **Проверено на реальном gfl2_asteria_arms: 12487 verts, 16828 tris,
-  stride 76, max index 12486 < vCount, fvf=0x5a237f80 (FVF_4L).**
+enum class EVVDResult
+{
+    Ok = 0,
+    NotVVD,
+    UnsupportedVersion,
+    MalformedBuffer,
+};
 
-## Точка вшивания
-`FHierrarhyVisual::Load` (Layers/xrRender/FHierrarhyVisual.cpp) читает `OGF_CHILDREN` → для каждого
-детского `open_chunk(count)` вызывает `RImplementation.model_CreateChild(name_load, O)`, где `O` —
-`IReader*` на поток, содержащий `OGF_VERTICES`/`OGF_INDICES`. `Fvisual::Load` читает ровно эти чанки.
+struct VVD_LAYOUT
+{
+    int id_off;             // 0
+    int version_off;        // 4
+    int numlods_off;        // 12
+    int nlverts_off;        // 16 (numLODVertexes[0])
+    int vstart_off;         // 56
+    int tstart_off;         // 60
+    int vert_stride;        // sizeof(vertex)
+    int pos_off;            // байтовое смещение позиции внутри вершины
+    int normal_off;         // байтовое смещение нормали
+    int uv_off;             // байтовое смещение UV (два float)
+};
 
-Значит, чтобы вставить Source-меш как дочерний визуал, достаточно:
+inline VVD_LAYOUT DefaultVvdLayout()
+{
+    // Подтверждено на реальном v49/GMod: stride 48, pos@16, normal@28, uv@40.
+    return VVD_LAYOUT{0, 4, 12, 16, 56, 60, 48, 16, 28, 40};
+}
 
-```
-RImplementation.model_CreateChild(name, SyntheticReader(ogf_bytes))
-```
-
-где `ogf_bytes` = вывод `BuildSourceMeshOGF`. Все остальные побочные эффекты (регистрация визуала,
-создание DX-буферов `p_rm_Vertices`/`p_rm_Indices`, bounding-объёмы) делает сам движок.
-
-## Открытые вопросы (решать в след. раундах)
-1. **Кто является родителем и откуда берётся его Fmatrix?** Детский визуал рендерится в модельной
-   системе родителя. При импорте Source-модели как целого нужен родитель-`CKinematics` с
-   `CBoneData[]` из тех же костей. Скелет уже импортируется (`TryImportSourceSkeleton`). Надо
-   свести: родитель = импортированный скелет, ребёнок = импортированный меш.
-2. **boneMap / boneID flip.** В `.vtx` кости — глобальные индексы Source-скелета; `CBoneData`-ы
-   движка создаются в том же порядке (`.mdl`), поэтому `boneMap` identity. Но у Source-скелета
-   «корневой» кост обычно индекс 0, а X-Ray-`CKinematics` может иметь другой корень/порядок.
-   Нужна on-screen сверка `Fmatrix` костей (пункт 3 общего плана).
-3. **fvf.** Для `vertBoned4W` = `OGF_VERTEXFORMAT_FVF_4L`. `Fvisual`/`FVisual` создают DX-буферы
-   по `FVF::ComputeVertexSize(fvf)` — 76 байт, совпадает.
-4. **Как именно подать байты движку.** Варианты: (а) синтетический `CTempReader` вокруг буфера и
-   вызов `model_CreateChild` напрямую; (б) ручное создание `IRender_Mesh` и `p_rm_Vertices`.
-   Предпочтителен (а) — максимально полагается на нативный конвейер и проще поддерживать.
-
-## Почему именно так
-Правило из контекста: **это должна быть engine-уровневая возможность, а не мод-хак.** Загрузка
-через `RImplementation.model_CreateChild` + `Fvisual::Load` есть именно такой путь: меш становится
-обычным визуалом, который живёт в общем пуле, участвует в отсечении, сортировке и LOD, лечится
-стандартными средствами отладки (`r__geometry`, wireframe). Самодельные DX-буферы этого не дают.
+// Читает вершины из .vvd. outVerts заполняется по LOD(0). Возвращает результат.
+EVVDResult ReadVvdVertices(const void* data, std::size_t size, std::vector<VVD_VERTEX>& outVerts,
+                           const VVD_LAYOUT& layout = DefaultVvdLayout());
+const char* VvdResultName(EVVDResult r);
+} // namespace SourceMdl

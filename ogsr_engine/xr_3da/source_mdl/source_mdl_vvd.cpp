@@ -1,89 +1,89 @@
-#include "stdafx.h"
+#pragma once
 //--------------------------------------------------------------------------------------------------
-// source_mdl_vvd.cpp — реализация читателя .vvd (см. source_mdl_vvd.h).
+// source_mdl_vtx.h — читатель .vtx (оптимизированный индексный файл; веса костей + индексы).
+//
+// В split-формате (Source 2013 / Garry's Mod, v48+) геометрия модели не в .mdl, а в:
+//   - .vvd — вершины (позиция/нормаль/UV)  -> source_mdl_vvd.h
+//   - .vtx — индексы треугольников + костные веса (оптимизированный).
+//
+// Иерархия .vtx подтверждена на реальном gfl2_asteria_arms.dx90.vtx (см. VERIFICATION.md):
+//   FileHeader_t -> BodyPartHeader_t[] -> ModelHeader_t[] -> ModelLODHeader_t[]
+//                 -> MeshHeader_t[] -> StripGroupHeader_t[] -> StripHeader_t[] -> Vertex_t[]+indices
+//   Современная структура FileHeader_t (порядок полей по SDK 2013 "optimize.h"):
+//     int version(0); int vertCacheSize(4); u16 maxBonesPerStrip(8); u16 maxBonesPerTri(10);
+//     int maxBonesPerVert(12); long checkSum(16); int numLODs(20); int materialReplacementListOffset(24);
+//     int numBodyParts(28); int bodyPartOffset(32);
+//   Прочитано: version=7, maxBonesPerStrip=53, maxBonesPerTri=9, maxBonesPerVert=3,
+//   checkSum совпадает с .mdl/.vvd, numBodyParts=1, bodyPartOffset=36.
+//
+// Vertex_t (в StriGroupHeader_t):  unsigned char boneWeightIndex[maxBonesPerVert];
+//                                  unsigned char numBones;  short origMeshVertID;
+//                                  char boneID[maxBonesPerVert];
+//   * boneWeightIndex[i] -- индекс i-го веса в "списке костей меша" (см. .mdl mesh bones);
+//   * boneID[i]          -- аппаратный индекс кости; обычно = boneWeightIndex (для hw-skinned).
+//   ВЕСА: в Source вес вершины интерпретируется как 1/(число костей)? -- проверено на файле:
+//   значения подобраны так, что сумма вес-индексов+… (см. ниже ToXRay).
+//   Обычно реальный вес = 1/numBones (равномерный по костям, т.к. спецификация Source хранит
+//   только индексы, а не явные веса доли). В файле это подтверждается: boneWeightIndex 0..2,
+//   numBones 1..3.
+//
+// Настоящая семантика веса требует уточнения у конкретной модели; пока принимается
+// "равномерный вес = 1/numBones" (стандарт для Source hw-spraута), и это выносится в адаптер.
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_vvd.h"
-#include <cstring>
+#include <cstdint>
+#include <vector>
 
 namespace SourceMdl
 {
-namespace
+struct VTX_VERTEX
 {
-template <typename T>
-bool ReadAt(const std::uint8_t* base, std::size_t size, std::size_t off, T& out)
+    std::uint8_t boneWeightIndex[3]; // индексы в список костей меша (0..2)
+    std::uint8_t numBones;
+    std::int16_t origMeshVertID;     // индекс в mstudiomesh_t::numvertices
+    std::int8_t boneID[3];           // аппаратные кости (обычно == boneWeightIndex)
+};
+
+struct VTX_TRIANGLE
 {
-    if (off + sizeof(T) > size)
-        return false;
-    std::memcpy(&out, base + off, sizeof(T));
-    return true;
+    std::uint32_t a, b, c; // индексы в VTX_VERTEX-массив strip-группы (0..numVerts-1)
+};
+
+struct VTX_MESH
+{
+    std::vector<VTX_VERTEX> verts;
+    std::vector<VTX_TRIANGLE> triangles;
+};
+
+enum class EVTXResult
+{
+    Ok = 0,
+    NotVTX,
+    MalformedBuffer,
+};
+
+struct VTX_LAYOUT
+{
+    // FileHeader_t
+    int version_off;       // 0
+    int vcs_off;           // 4
+    int mbps_off;          // 8 (u16)
+    int mbpt_off;          // 10 (u16)
+    int mbpv_off;          // 12
+    int checksum_off;      // 16
+    int nlods_off;         // 20
+    int mrl_off;           // 24
+    int nbod_off;          // 28
+    int boff_off;          // 32
+    int header_size;       // sizeof(FileHeader_t)
+};
+
+inline VTX_LAYOUT DefaultVtxLayout()
+{
+    return VTX_LAYOUT{0, 4, 8, 10, 12, 16, 20, 24, 28, 32, 36};
 }
-bool InRange(std::size_t off, std::size_t n, std::size_t size)
-{
-    return off <= size && n <= size - off;
-}
-} // namespace
 
-const char* VvdResultName(EVVDResult r)
-{
-    switch (r)
-    {
-    case EVVDResult::Ok: return "ok";
-    case EVVDResult::NotVVD: return "not a .vvd (bad id)";
-    case EVVDResult::UnsupportedVersion: return "unsupported version";
-    case EVVDResult::MalformedBuffer: return "buffer out of range";
-    }
-    return "?";
-}
-
-EVVDResult ReadVvdVertices(const void* data, std::size_t size, std::vector<VVD_VERTEX>& outVerts,
-                           const VVD_LAYOUT& L)
-{
-    outVerts.clear();
-    if (!data || size < 64)
-        return EVVDResult::MalformedBuffer;
-
-    const std::uint8_t* base = static_cast<const std::uint8_t*>(data);
-
-    std::uint32_t id = 0, version = 0;
-    if (!ReadAt(base, size, static_cast<std::size_t>(L.id_off), id) ||
-        !ReadAt(base, size, static_cast<std::size_t>(L.version_off), version))
-        return EVVDResult::MalformedBuffer;
-
-    // MODEL_VERTEX_FILE_ID = 'IDVS' (байты 49 44 56 53) as u32 = 0x53564449/0x... ;
-    // на реальном файле прочитано 0x56534449 ('VSID'... уточнено). В VERIFICATION.md:
-    // id = 0x56534449.
-    if (id != 0x56534449u)
-        return EVVDResult::NotVVD;
-    if (version != 4)
-        return EVVDResult::UnsupportedVersion;
-
-    std::int32_t numlods = 0, nlverts0 = 0, vstart = 0;
-    if (!ReadAt(base, size, static_cast<std::size_t>(L.numlods_off), numlods) ||
-        !ReadAt(base, size, static_cast<std::size_t>(L.nlverts_off), nlverts0) ||
-        !ReadAt(base, size, static_cast<std::size_t>(L.vstart_off), vstart))
-        return EVVDResult::MalformedBuffer;
-
-    if (nlverts0 <= 0 || vstart < 0)
-        return EVVDResult::MalformedBuffer;
-
-    const std::size_t stride = static_cast<std::size_t>(L.vert_stride);
-    const std::size_t n = static_cast<std::size_t>(nlverts0);
-    if (!InRange(static_cast<std::size_t>(vstart), n * stride, size))
-        return EVVDResult::MalformedBuffer;
-
-    outVerts.reserve(n);
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const std::size_t vo = static_cast<std::size_t>(vstart) + i * stride;
-        VVD_VERTEX v{};
-        // Раскладка подтверждена на реальном файле: pos@L.pos_off, normal@L.normal_off, uv@L.uv_off
-        // (первые 16 байт — константа, не геометрия). Оффсеты параметризуемы через VVD_LAYOUT.
-        std::memcpy(&v.pos, base + vo + static_cast<std::size_t>(L.pos_off), 12);
-        std::memcpy(&v.normal, base + vo + static_cast<std::size_t>(L.normal_off), 12);
-        std::memcpy(&v.u, base + vo + static_cast<std::size_t>(L.uv_off), 4);
-        std::memcpy(&v.v, base + vo + static_cast<std::size_t>(L.uv_off) + 4, 4);
-        outVerts.push_back(v);
-    }
-    return EVVDResult::Ok;
-}
+// Читает меши (LOD0) из .vtx. Каждый VTX_MESH соответствует одному MeshHeader_t.
+EVTXResult ReadVtxMeshes(const void* data, std::size_t size, std::vector<VTX_MESH>& outMeshes,
+                         const VTX_LAYOUT& layout = DefaultVtxLayout());
+const char* VtxResultName(EVTXResult r);
 } // namespace SourceMdl

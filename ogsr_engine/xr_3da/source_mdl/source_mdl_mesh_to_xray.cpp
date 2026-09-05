@@ -1,98 +1,93 @@
+#pragma once
 //--------------------------------------------------------------------------------------------------
-// source_mdl_mesh_to_xray.cpp -- движковый упаковщик Source-вершин в X-Ray vertex.
+// source_mdl_mesh_read.h -- разбор классического ВСТРОЕННОГО (inline) формата вершин Source .MDL.
+//
+// ИСТОРИЧЕСКОЕ ОГРАНИЧЕНИЕ (важно!):
+//   Современные модели Garry's Mod / Source v48+ хранят геометрию в ОТДЕЛЬНОМ файле
+//   (MODEL_VERTEX_FILE_ID + fixup-таблица). Этот модуль читает только классический INLINE
+//   вариант (примерно v44-v47, "SDK 2007/HL2"-подобный), где mstudiovertex_t лежит прямо в .mdl.
+//   Split-формат — отдельный хрупкий под-модуль, требующий реального .mdl/.vtx для проверки.
+//
+//   Смещения вложенных записей зависят от версии, поэтому ВСЕ они собраны в одной таблице
+//   CLASSIC_LAYOUT ниже. Если конкретный ассет не читается первым подходом — обычно достаточно
+//   поправить одно-два значения в этой таблице (обычно это размер/выравнивание mstudiovertex_t).
+//   Значения по умолчанию соответствуют классической раскладке v47 inline.
 //--------------------------------------------------------------------------------------------------
-#include "stdafx.h"
-#include "source_mdl_mesh_to_xray.h"
-#include <cmath>
+#include "source_mdl_mesh.h"
+#include <cstdint>
 
 namespace SourceMdl
 {
-namespace
+// Оффсеты записей классического inline-формата.
+struct CLASSIC_LAYOUT
 {
-// Устаревание: gейте примитивную ортонормальную базу (T/B) из нормали, когда меш Source
-// отдаёт только позицию/нормаль/UV (в классическом inline-формате касательных нет).
-void BuildTangentBasis(const Fvector& N, Fvector& T, Fvector& B)
+    // studiohdr_t
+    int numbodyparts_off;   // смещение int numbodyparts
+    int bodypartindex_off;  // смещение int bodypartindex (байтовое смещение к массиву)
+    // mstudiobodyparts_t
+    int bp_nummodels_off;   // 4
+    int bp_modelindex_off;  // 12 (байтовое смещение к массиву моделей)
+    // mstudiomodel_t
+    int mdl_numvertices_off;  // 64
+    int mdl_vertexindex_off;  // 68 (байтовое смещение к массиву вершин)
+    int mdl_nummeshes_off;    // 72
+    int mdl_meshindex_off;    // 76 (байтовое смещение к массиву мешей)
+    // mstudiomesh_t
+    int mesh_numtri_off;      // 0
+    int mesh_triindex_off;    // 4 (байтовое смещение к массиву индексов)
+    int mesh_numvert_off;     // 8
+    int mesh_vertoffset_off;  // 12 (счётчик смещения вершин в массиве модели)
+    // mstudiovertex_t
+    int vert_stride;          // sizeof(mstudiovertex_t)
+    int vert_weight_off;      // смещение блока весов (0)
+    int vert_bone_off;        // смещение массива индексов костей (+3)
+    int vert_numbones_off;    // смещение байта числа влияний (+6)
+    int vert_pos_off;         // смещение позиции
+    int vert_normal_off;      // смещение нормали
+    int vert_uv_off;          // смещение UV (два float)
+};
+
+// Классическая раскладка по умолчанию (v47 inline). См. комментарий выше.
+inline CLASSIC_LAYOUT ClassicInlineLayout()
 {
-    Fvector up(0.f, 1.f, 0.f);
-    if (std::fabs(N.dotproduct(up)) > 0.99f)
-        up.set(1.f, 0.f, 0.f);
-    T.crossproduct(up, N);
-    T.normalize_safe();
-    B.crossproduct(N, T);
-    B.normalize_safe();
+    return CLASSIC_LAYOUT{
+        /*numbodyparts_off*/ 232,
+        /*bodypartindex_off*/ 236,
+        /*bp_nummodels_off*/ 4,
+        /*bp_modelindex_off*/ 12,
+        /*mdl_numvertices_off*/ 64,
+        /*mdl_vertexindex_off*/ 68,
+        /*mdl_nummeshes_off*/ 72,
+        /*mdl_meshindex_off*/ 76,
+        /*mesh_numtri_off*/ 0,
+        /*mesh_triindex_off*/ 4,
+        /*mesh_numvert_off*/ 8,
+        /*mesh_vertoffset_off*/ 12,
+        /*vert_stride*/ 40,
+        /*vert_weight_off*/ 0,
+        /*vert_bone_off*/ 3,
+        /*vert_numbones_off*/ 6,
+        /*vert_pos_off*/ 8,
+        /*vert_normal_off*/ 20,
+        /*vert_uv_off*/ 32};
 }
-} // namespace
 
-bool BuildXRayMesh(const MESH& src, const int* boneMap, const Fmatrix& basis,
-                   std::vector<vertBoned4W>& outVerts, std::vector<u16>& outIndices)
+// Тип результата чтения (для понятных сообщений).
+enum class EReadMeshResult
 {
-    outVerts.clear();
-    outIndices.clear();
-    if (src.vertices.empty())
-        return false;
+    Ok = 0,
+    NotSourceMdl,         // плохой id
+    UnsupportedVersion,   // версия вне ожидаемого
+    SplitVertexFile,      // модель использует отдельный файл вершин (не поддерживается в этом раунде)
+    MalformedBuffer,      // выход за пределы буфера
+    EmptyModel,           // нет вершин
+};
 
-    outVerts.reserve(src.vertices.size());
-    outIndices.reserve(src.triangles.size() * 3);
-
-    for (const MESH_VERTEX& sv : src.vertices)
-    {
-        vertBoned4W dv{};
-
-        // Позиция/нормаль через базис (det == +1, нормаль не инвертируем).
-        dv.P.set(sv.pos.x, sv.pos.y, sv.pos.z);
-        basis.transform_tiny(dv.P);
-        dv.N.set(sv.normal.x, sv.normal.y, sv.normal.z);
-        basis.transform_dir(dv.N);
-        BuildTangentBasis(dv.N, dv.T, dv.B);
-        dv.u = sv.u;
-        dv.v = sv.v;
-
-        // Нормализовать веса (до 4 влияний) и переиндексировать кости.
-        // sv.bone[i] — ГЛАВАЛЬНЫЙ индекс кости Source (0..numbones-1, как в .mdl/.vtx).
-        // boneMap — переход Source-индекс -> движковый (OGSR) индекс: тот же порядок, что
-        // в vecBones/векторах из BuildEngineSkeleton; -1 => кость не найдена.
-        float wt[4];
-        int bi[4];
-        for (int i = 0; i < 4; ++i)
-        {
-            wt[i] = (i < 3 && i < sv.num_weights) ? sv.weight[i] : 0.f;
-            bi[i] = -1;
-            if (i < 3 && i < sv.num_weights && sv.bone[i] >= 0)
-            {
-                const int mapped = boneMap ? boneMap[sv.bone[i]] : sv.bone[i];
-                bi[i] = mapped;
-            }
-        }
-        const int n = NormalizeWeights(wt, bi, sv.num_weights);
-
-        // По умолчанию "ничего" -> кость 0.
-        for (int i = 0; i < 4; ++i)
-        {
-            if (i >= n || bi[i] < 0)
-            {
-                dv.m[i] = 0;
-                dv.w[i] = (i == 0) ? 1.f : 0.f;
-                bi[i] = 0;
-            }
-            else
-            {
-                dv.m[i] = static_cast<u16>(bi[i]);
-                dv.w[i] = wt[i];
-            }
-        }
-        outVerts.push_back(dv);
-    }
-
-    for (const MESH_TRIANGLE& t : src.triangles)
-    {
-        if (t.a < outVerts.size() && t.b < outVerts.size() && t.c < outVerts.size())
-        {
-            outIndices.push_back(static_cast<u16>(t.a));
-            outIndices.push_back(static_cast<u16>(t.b));
-            outIndices.push_back(static_cast<u16>(t.c));
-        }
-    }
-
-    return !outVerts.empty() && !outIndices.empty();
-}
+// Читает геометрию из буфера классического .mdl в плоский вектор мешей (по одному на модель).
+// Модель рассматривается как "скелет + меш": здесь возвращаются только вершины/треугольники,
+// без скелета (скелет берётся из source_mdl_skeleton). Если не требуется считывать тела —
+// numbodyparts читается по той же таблице.
+EReadMeshResult ReadClassicMesh(const void* data, std::size_t size, std::vector<MESH>& outMeshes,
+                                const CLASSIC_LAYOUT& layout = ClassicInlineLayout());
+const char* ReadMeshResultName(EReadMeshResult r);
 } // namespace SourceMdl

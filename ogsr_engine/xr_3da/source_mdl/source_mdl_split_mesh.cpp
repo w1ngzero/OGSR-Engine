@@ -1,66 +1,121 @@
-#include "stdafx.h"
+#pragma once
 //--------------------------------------------------------------------------------------------------
-// source_mdl_split_mesh.cpp — сборка скин-меша из .vvd + .vtx (split-формат Source).
-// Чистый модуль (без X-Ray), результат — MESH в Source-конвенции.
+// Source engine (Valve Source SDK, as used by e.g. Garry's Mod) skeleton reader for X-Ray/OGSR.
+//
+// ROUND 1 -- "reader + validation layer".
+//
+// Goal of the series: let OGSR load a skeletal model that was authored for the *Source* engine
+// (a Valve .MDL of a NPC/player/physics character, e.g. from Garry's Mod) and drive X-Ray
+// skinning with it.
+//
+// The .MDL (StudioMDL) format is a binary container described by the `studiohdr_t` layout below.
+// This file implements ONLY the skeleton part we need:
+//    * studiohdr_t				-- header (id, version, bone count, bone offset, ...)
+//    * mstudiobone_t			-- one bone (name, parent index, position, quaternion, flags)
+//
+// Everything is exposed in plain-standard types so this unit can be compiler-independent and
+// unit-tested without pulling in the whole X-Ray build.
+//
+// The output is a bone hierarchy + bind pose, ready to be converted into OGSR CBoneData/vecBones
+// by source_mdl_to_xray.cpp, which then plugs into CKinematics (see SkeletonCustom.cpp Load()).
+//
+// NOTE ON CONVENTIONS / coordinate systems:
+//    Source models are left-handed, Y-up. X-Ray/OGSR is right-handed Z-up. The raw local
+//    bone transforms parsed here are correct *within the Source frame*. A configurable axis
+//    conversion stage lives in the adapter (source_mdl_to_xray.cpp) and is documented there.
+//    This reader stays "frame-agnostic" on purpose: it reproduces the data faithfully.
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_split_mesh.h"
+
+#include <string>
+#include <vector>
+#include <cstdint>
 
 namespace SourceMdl
 {
-bool BuildSplitMesh(const std::vector<VVD_VERTEX>& vvdVerts,
-                    const std::vector<VTX_MESH>& vtxMeshes,
-                    std::vector<MESH>& outMeshes)
+// ------------------------------------------------------------------------------------------------
+// Minimal linear-algebra types (float, row-major for matrices in the 4x4 case).
+// Kept local so the reader has zero engine dependencies and is unit-testable.
+// ------------------------------------------------------------------------------------------------
+struct vec3
 {
-    outMeshes.clear();
+    float x, y, z;
+};
 
-    // Проверка: сумма вершин всех мешей .vtx должна равняться числу вершин .vvd.
-    std::size_t totalVtx = 0;
-    for (const auto& vm : vtxMeshes)
-        totalVtx += vm.verts.size();
-    if (vvdVerts.empty() || vtxMeshes.empty() || totalVtx != vvdVerts.size())
-        return false;
+struct quat
+{
+    float x, y, z, w;
+};
 
-    std::size_t base = 0; // накопленный сдвиг текущего меша в .vvd
-    for (const auto& vm : vtxMeshes)
-    {
-        MESH out;
-        out.vertices.reserve(vm.verts.size());
-        out.triangles.reserve(vm.triangles.size());
+struct mat4
+{
+    float m[4][4]; // row-major
+};
 
-        for (const auto& vtxVer : vm.verts)
-        {
-            // vvd-индекс = base + origMeshVertID (проверенный маппинг split-формата).
-            const std::size_t vvdIdx = base + static_cast<std::size_t>(vtxVer.origMeshVertID);
-            if (vvdIdx >= vvdVerts.size())
-                return false; // деформированные данные — не собирать мусор
-            const VVD_VERTEX& vd = vvdVerts[vvdIdx];
+// ------------------------------------------------------------------------------------------------
+// The result of parsing one bone.
+// ------------------------------------------------------------------------------------------------
+struct BONE
+{
+    std::string name;       // lowercase, as X-Ray expects bone names
+    int parent;             // index of parent bone, or -1 for root
+    bool is_root;           // true if parent == -1
 
-            MESH_VERTEX mv;
-            mv.pos = vd.pos;
-            mv.normal = vd.normal;
-            mv.u = vd.u;
-            mv.v = vd.v;
+    // local-to-parent transform, exactly as stored in the Source file
+    vec3 pos;               // bone position relative to parent
+    quat rotation;          // bone rotation (quaternion) relative to parent
+    vec3 pos_scale;         // bone position scale (usually 1,1,1)
+    vec3 rot_scale;         // bone rotation scale (usually 1,1,1)
+    std::uint32_t flags;    // mstudiobone_t::flags
 
-            // Веса: boneID — ГЛАВАЛЬНЫЙ индекс (HWSKINNED), доля = 1/numBones.
-            const int nb = vtxVer.numBones > 0 ? vtxVer.numBones : 1;
-            int n = 0;
-            for (int i = 0; i < 3 && i < nb; ++i)
-            {
-                mv.bone[i] = vtxVer.boneID[i];
-                mv.weight[i] = 1.0f / static_cast<float>(nb);
-                ++n;
-            }
-            mv.num_weights = n;
-            out.vertices.push_back(mv);
-        }
+    // computed: the bone's own frame in model space (accumulated down the hierarchy).
+    //   model_bind = parent_model_bind * local(pos, quat)   (row-major -> "bone->model" style
+    //   composition; see ComputeBindMatrices for the exact ordering so it matches the engine
+    //   convention used by GetBoneBindMatrix()).
+    mat4 model_bind;
+};
 
-        for (const auto& t : vm.triangles)
-            out.triangles.push_back(MESH_TRIANGLE{t.a, t.b, t.c});
+//! Studio header magic IDs and the version range we accept.
+struct Constants
+{
+    // 'IDST' read as little-endian u32. Verified against a real Source v49 model: bytes 49 44 53 54
+    // = 'I','D','S','T', little-endian u32 = 0x54534449.
+    static constexpr std::uint32_t kMDLID = 0x54534449;
+    static constexpr std::uint32_t kMDLVERSION_MIN = 44;
+    static constexpr std::uint32_t kMDLVERSION_MAX = 49;
+};
 
-        outMeshes.push_back(std::move(out));
-        base += vm.verts.size();
-    }
+// ------------------------------------------------------------------------------------------------
+// Parser.
+// ------------------------------------------------------------------------------------------------
+class CSourceMdlSkeleton
+{
+public:
+    //! Parse the studiohdr_t + bone array from a raw memory buffer.
+    //! Returns false and leaves a diagnostic in GetLastError() on malformed data.
+    bool Parse(const void* data, std::size_t size);
 
-    return true;
-}
+    const std::vector<BONE>& GetBones() const { return m_bones; }
+    int RootIndex() const { return m_root; }
+    const std::string& GetLastError() const { return m_error; }
+
+    //! Rebuild m_bones[i].model_bind from the local pos/quat + parent hierarchy.
+    //! (Idempotent; called automatically at the end of Parse().)
+    void ComputeBindMatrices();
+
+    //! Sanity helper used by tests / console dumps: print a bone dump to stdout.
+    void Dump() const;
+
+private:
+    std::vector<BONE> m_bones;
+    int m_root = -1;
+    std::string m_error;
+
+    bool ReadName(const std::uint8_t* base, std::uint32_t offset, std::string& out,
+                  std::size_t size) const;
+};
+
+// ------------------------------------------------------------------------------------------------
+// The engine-facing conversion is implemented in source_mdl_to_xray.cpp. It consumes a
+// CSourceMdlSkeleton and produces X-Ray's CBoneData tree / vecBones.
+// ------------------------------------------------------------------------------------------------
 } // namespace SourceMdl

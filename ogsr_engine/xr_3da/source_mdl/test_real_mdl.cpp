@@ -1,271 +1,188 @@
 //--------------------------------------------------------------------------------------------------
-// test_real_mdl.cpp — СВЕРКА ИМПОРТЁРА НА РЕАЛЬНОМ .MDL из Garry's Mod (руки, split-формат v49).
+// test_ogf_stream.cpp — офлайн-валидация байтового контракта OGF-потока, который строит
+// BuildSourceMeshOGFStream() (см. source_mdl_import.cpp), ровно так, как его читает
+// CSkeletonX_ST::Load()/dxRender_Visual::Load() в движке OGSR.
 //
-// Читает настоящий бинарный файл gfl2_asteria_arms.mdl через исправленный ридер скелета и
-// выводит результат. Это доказывает, что после правок (id=0x54534449, stride кости=216 для v49)
-// импортёре реально парсит скелет этой модели, а не только синтетический тест.
+//   g++ -std=c++17 -O2 -o test_ogf_stream test_ogf_stream.cpp \
+//       source_mdl_vvd.cpp source_mdl_vtx.cpp source_mdl_split_mesh.cpp
+//   ./test_ogf_stream <vvd> <vtx>
 //
-// Компиляция (бинарный файл кладётся рядом или путь передаётся аргументом):
-//   g++ -std=c++17 -O2 -o test_real \
-//       test_real_mdl.cpp source_mdl_skeleton.cpp source_mdl_mesh.cpp source_mdl_mesh_read.cpp
-//   ./test_real /home/user/hands/gfl2_asteria_arms.mdl
+// ПРОВЕРЯЕТ:
+//   * OGF_HEADER читается как ogf_header (формат_version=4, type=MT_SKELETON_GEOMDEF_ST=5,
+//     shader_id=0, размер == sizeof(ogf_header)==44);
+//   * OGF_VERTICES: fvf=OGF_VERTEXFORMAT_FVF_4L (5*0x12071980), vCount, stride вершин ==76;
+//   * OGF_INDICES:  count, u16[];
+//   * порядок чанков и их id/size-упаковка соответствуют IReader::find_chunk.
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_skeleton.h"
-#include "source_mdl_mesh_read.h"
-#include "source_mdl_mesh.h"
 #include "source_mdl_vvd.h"
 #include "source_mdl_vtx.h"
 #include "source_mdl_split_mesh.h"
 #include "source_mdl_basis.h"
-#include "source_mdl_anim.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <vector>
 #include <string>
+#include <cstdint>
 
 using namespace SourceMdl;
 
+// Локальное зеркало vertBoned4W (без движковых типов, тот же порядок/размер полей = 76 байт).
+struct V4W
+{
+    std::uint16_t m[4];
+    float P[3];
+    float N[3];
+    float T[3];
+    float B[3];
+    float w[3];
+    float u, v;
+};
+static_assert(sizeof(V4W) == 76, "V4W must be 76 bytes");
+
+// Локальное зеркало ogf_header.
+struct OGFHDR
+{
+    std::uint8_t format_version;
+    std::uint8_t type;
+    std::uint16_t shader_id;
+    float bbmin[3], bbmax[3];
+    float bsp_c[3];
+    float bsp_r;
+};
+static_assert(sizeof(OGFHDR) == 44, "OGFHDR must be 44 bytes");
+
+enum { OGF_HEADER = 1, OGF_TEXTURE = 2, OGF_VERTICES = 3, OGF_INDICES = 4 };
+static const std::uint32_t kFVF4L = 5u * 0x12071980u;
+enum { MT_SKELETON_GEOMDEF_ST = 5, xrOGF_FormatVersion = 4 };
+
+static int g_fail = 0;
+static void check(bool ok, const char* m) { std::printf("  [%s] %s\n", ok ? "ok" : "FAIL", m); if (!ok) g_fail++; }
+
+static void Put32(std::vector<std::uint8_t>& b, std::uint32_t v)
+{
+    b.push_back((std::uint8_t)(v & 0xff)); b.push_back((std::uint8_t)((v >> 8) & 0xff));
+    b.push_back((std::uint8_t)((v >> 16) & 0xff)); b.push_back((std::uint8_t)((v >> 24) & 0xff));
+}
+static void PutChunk(std::vector<std::uint8_t>& b, std::uint32_t id, const std::vector<std::uint8_t>& p)
+{ Put32(b, id); Put32(b, (std::uint32_t)p.size()); b.insert(b.end(), p.begin(), p.end()); }
+static void PutCString(std::vector<std::uint8_t>& b, const char* s) { while (*s) b.push_back(*(std::uint8_t*)s++); b.push_back(0); }
+
+// Мини-парсер find_chunk (u32 id, u32 size).
+static bool FindChunk(const std::uint8_t* p, std::size_t sz, std::uint32_t id, std::size_t& off, std::size_t& len)
+{
+    std::size_t q = 0;
+    while (q + 8 <= sz)
+    {
+        std::uint32_t cid, csz; std::memcpy(&cid, p + q, 4); std::memcpy(&csz, p + q + 4, 4);
+        if (cid == id) { off = q + 8; len = csz; return true; }
+        q += 8 + csz;
+    }
+    return false;
+}
+
 int main(int argc, char** argv)
 {
-    if (argc < 2)
-    {
-        std::printf("usage: %s <model.mdl>\n", argv[0]);
-        return 2;
-    }
-    FILE* f = std::fopen(argv[1], "rb");
-    if (!f)
-    {
-        std::printf("cannot open %s\n", argv[1]);
-        return 2;
-    }
-    std::fseek(f, 0, SEEK_END);
-    long sz = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<unsigned char> buf((size_t)sz);
-    if (fread(buf.data(), 1, (size_t)sz, f) != (size_t)sz)
-    {
-        std::printf("short read\n");
-        return 2;
-    }
-    std::fclose(f);
+    if (argc < 3) { std::printf("usage: %s <vvd> <vtx>\n", argv[0]); return 2; }
 
-    std::printf("=== real model: %s (%ld bytes) ===\n", argv[1], sz);
+    auto read = [&](const char* p) {
+        FILE* f = std::fopen(p, "rb"); std::fseek(f, 0, SEEK_END); long sz = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+        std::vector<std::uint8_t> b((size_t)sz); if (std::fread(b.data(), 1, (size_t)sz, f) != (size_t)sz) { std::fclose(f); return b; }
+        std::fclose(f); return b;
+    };
+    auto vvb = read(argv[1]); auto vtb = read(argv[2]);
 
-    // Скелет.
-    CSourceMdlSkeleton sk;
-    bool ok = sk.Parse(buf.data(), buf.size());
-    std::printf("skeleton parse: %s", ok ? "OK" : "FAIL");
-    if (!sk.GetLastError().empty())
-        std::printf(" (%s)", sk.GetLastError().c_str());
-    std::printf("\n");
-    if (ok)
-    {
-        const auto& bones = sk.GetBones();
-        std::printf("bones: %d, root=%d\n", (int)bones.size(), sk.RootIndex());
-        for (size_t i = 0; i < bones.size() && i < 8; ++i)
-        {
-            const BONE& b = bones[i];
-            std::printf("  [%d] %-32s parent=%d  pos=(%.2f,%.2f,%.2f) quat=(%.2f,%.2f,%.2f,%.2f)\n",
-                        (int)i, b.name.c_str(), b.parent, b.pos.x, b.pos.y, b.pos.z,
-                        b.rotation.x, b.rotation.y, b.rotation.z, b.rotation.w);
-        }
-        if (bones.size() > 8)
-            std::printf("  ... ещё %d костей\n", (int)bones.size() - 8);
-        // проверка иерархии
-        int bad = 0;
-        for (const auto& b : bones)
-            if (!b.is_root && (b.parent < 0 || b.parent >= (int)bones.size()))
-                ++bad;
-        std::printf("hierarchy validity: %s\n", bad ? "PROBLEM" : "OK");
-    }
-
-    // Меш (ожидаем split-format, т.к. вершины в .vvd). Подтверждаем диагностику.
+    std::vector<VVD_VERTEX> verts;
+    if (ReadVvdVertices(vvb.data(), vvb.size(), verts) != EVVDResult::Ok) return 2;
+    std::vector<VTX_MESH> vmeshes;
+    if (ReadVtxMeshes(vtb.data(), vtb.size(), vmeshes) != EVTXResult::Ok) return 2;
     std::vector<MESH> meshes;
-    EReadMeshResult r = ReadClassicMesh(buf.data(), buf.size(), meshes, ClassicInlineLayout());
-    std::printf("mesh (inline) reader: %s  (%s)\n", ReadMeshResultName(r), r == EReadMeshResult::SplitVertexFile ? "=> split-format: геометрия в .vvd/.vtx, ожидаемо" : "");
+    if (!BuildSplitMesh(verts, vmeshes, meshes)) return 2;
 
-    // Дополнительно: если передан путь к .vvd — считаем вершины и проверяем .vvd-модуль.
-    if (argc > 2)
+    // Собираем V4W в X-Ray-конвенции (базис + веса/кости как в BuildXRayMesh).
+    std::vector<V4W> vbuf;
+    std::vector<std::uint16_t> ibuf;
+    const Basis3 basis = GetSourceToXRayBasis();
+    std::size_t base = 0;
+    for (const auto& m : meshes)
     {
-        std::string vvd_path = argv[2];
-        if (vvd_path.size() >= 4 && vvd_path.substr(vvd_path.size() - 4) == ".vvd")
+        for (const auto& v : m.vertices)
         {
-            FILE* fv = std::fopen(vvd_path.c_str(), "rb");
-            if (!fv)
-            {
-                std::printf("cannot open %s\n", vvd_path.c_str());
-                return 2;
-            }
-            std::fseek(fv, 0, SEEK_END);
-            long vsz = std::ftell(fv);
-            std::fseek(fv, 0, SEEK_SET);
-            std::vector<unsigned char> vb((size_t)vsz);
-            if (fread(vb.data(), 1, (size_t)vsz, fv) != (size_t)vsz)
-            {
-                std::printf("short read %s\n", vvd_path.c_str());
-                std::fclose(fv);
-                return 2;
-            }
-            std::fclose(fv);
-            std::vector<VVD_VERTEX> verts;
-            EVVDResult vr = ReadVvdVertices(vb.data(), vb.size(), verts);
-            std::printf("vvd reader: %s  (%d verts)\n", VvdResultName(vr), (int)verts.size());
-            if (vr == EVVDResult::Ok && !verts.empty())
-                std::printf("  vert[0] pos=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) uv=(%.3f,%.3f)\n",
-                            verts[0].pos.x, verts[0].pos.y, verts[0].pos.z,
-                            verts[0].normal.x, verts[0].normal.y, verts[0].normal.z,
-                            verts[0].u, verts[0].v);
-
-            // Дополнительно: если передан путь к .vtx — считаем индексы + веса и сверяем.
-            if (argc > 3)
-            {
-                std::string vtx_path = argv[3];
-                FILE* ft = std::fopen(vtx_path.c_str(), "rb");
-                if (!ft)
-                {
-                    std::printf("cannot open %s\n", vtx_path.c_str());
-                    return 2;
-                }
-                std::fseek(ft, 0, SEEK_END);
-                long tsz = std::ftell(ft);
-                std::fseek(ft, 0, SEEK_SET);
-                std::vector<unsigned char> tb((size_t)tsz);
-                if (fread(tb.data(), 1, (size_t)tsz, ft) != (size_t)tsz)
-                {
-                    std::printf("short read %s\n", vtx_path.c_str());
-                    std::fclose(ft);
-                    return 2;
-                }
-                std::fclose(ft);
-
-                std::vector<VTX_MESH> vmeshes;
-                EVTXResult tr = ReadVtxMeshes(tb.data(), tb.size(), vmeshes);
-                std::printf("vtx reader: %s  (%d meshes)\n", VtxResultName(tr), (int)vmeshes.size());
-                if (tr == EVTXResult::Ok)
-                {
-                    bool rangeok = true;
-                    std::size_t totVerts = 0, totTris = 0, totBounds = 0;
-                    for (std::size_t mi = 0; mi < vmeshes.size(); ++mi)
-                    {
-                        const auto& vm = vmeshes[mi];
-                        totVerts += vm.verts.size();
-                        totTris += vm.triangles.size();
-                        for (const auto& tri : vm.triangles)
-                        {
-                            if (tri.a >= vm.verts.size() || tri.b >= vm.verts.size() ||
-                                tri.c >= vm.verts.size())
-                                ++totBounds;
-                        }
-                        // Сводка первой группы меша 0.
-                        if (mi == 0)
-                        {
-                            float maxw = 0.f;
-                            for (const auto& vtx : vm.verts)
-                                if (vtx.numBones > 0)
-                                {
-                                    // равномерный вес (см. комментарий в .h) — сумма = 1.0
-                                    float w = 1.0f / (float)vtx.numBones;
-                                    if (w > maxw)
-                                        maxw = w;
-                                }
-                            std::printf(
-                                "  mesh0: %d verts, %d tris, boneWeightIndex0=%d..%d numBones0=%d "
-                                "origMeshVertID0=%d, maxUniformWeight=%.2f\n",
-                                (int)vm.verts.size(), (int)vm.triangles.size(),
-                                vm.verts.empty() ? -1 : (int)vm.verts[0].boneWeightIndex[0],
-                                vm.verts.empty() ? -1 : (int)vm.verts[0].boneWeightIndex[2],
-                                vm.verts.empty() ? -1 : (int)vm.verts[0].numBones,
-                                vm.verts.empty() ? -1 : (int)vm.verts[0].origMeshVertID,
-                                maxw);
-                        }
-                    }
-                    std::printf("  totals: %d verts, %d tris, out-of-range indices: %d\n",
-                                (int)totVerts, (int)totTris, (int)totBounds);
-                    if (totBounds > 0)
-                        rangeok = false;
-                    std::printf("  index range: %s\n", rangeok ? "OK" : "PROBLEM");
-
-                    // Сборка скин-меша из .vvd + .vtx (Source-конвенция: позиция из .vvd,
-                    // веса/кости из .vtx через origMeshVertID).
-                    if (totVerts == verts.size())
-                    {
-                        std::vector<MESH> meshes;
-                        bool sm = BuildSplitMesh(verts, vmeshes, meshes);
-                        std::printf("split-mesh build: %s  (%d meshes)\n", sm ? "OK" : "FAIL",
-                                    (int)meshes.size());
-                        if (sm)
-                        {
-                            std::size_t sv = 0, st = 0;
-                            int maxBone = -1;
-                            for (const auto& me : meshes)
-                            {
-                                sv += me.vertices.size();
-                                st += me.triangles.size();
-                                for (const auto& mvb : me.vertices)
-                                    for (int i = 0; i < mvb.num_weights; ++i)
-                                        if (mvb.bone[i] > maxBone)
-                                            maxBone = mvb.bone[i];
-                            }
-                            const auto& first = meshes[0].vertices[0];
-                            std::printf("  totals: %d verts, %d tris; mesh0.vert0 pos=(%.2f,%.2f,%.2f) "
-                                        "bone0=%d w0=%.2f\n",
-                                        (int)sv, (int)st, first.pos.x, first.pos.y, first.pos.z,
-                                        first.bone[0], first.weight[0]);
-                            std::printf("  max global boneID = %d\n", maxBone);
-
-                            // Применяем чистый базис Source->X-Ray (det==+1) к позициям и
-                            // считаем bbox в X-Ray-системе (Z-вверх). Дубли-вершины из strip
-                            // могут слегка разойтись — не страшно, оцениваем охват.
-                            const Basis3 b = GetSourceToXRayBasis();
-                            float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-                            bool nonUnit = false;
-                            for (const auto& me : meshes)
-                            {
-                                for (const auto& mvb : me.vertices)
-                                {
-                                    Vec3f p = Transform(b, mvb.pos);
-                                    for (int c = 0; c < 3; ++c)
-                                    {
-                                        float v = (c == 0) ? p.x : (c == 1) ? p.y : p.z;
-                                        if (v < mn[c]) mn[c] = v;
-                                        if (v > mx[c]) mx[c] = v;
-                                    }
-                                    float len = mvb.normal.x * mvb.normal.x +
-                                                mvb.normal.y * mvb.normal.y +
-                                                mvb.normal.z * mvb.normal.z;
-                                    if (std::fabs(len - 1.0f) > 0.02f)
-                                        nonUnit = true;
-                                }
-                            }
-                            std::printf("  basis(XRay, Z-up) bbox: x[%.1f..%.1f] y[%.1f..%.1f] "
-                                        "z[%.1f..%.1f]\n", mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]);
-                            std::printf("  normals unit (det==+1, no flip): %s\n",
-                                        nonUnit ? "PROBLEM" : "OK");
-                        }
-                    }
-                }
-            }
+            V4W r{};
+            Vec3f p = Transform(basis, v.pos);
+            Vec3f n = Transform(basis, v.normal);
+            Vec3f up{0,0,1}; if (std::fabs(n.z) > 0.99f) up = Vec3f{1,0,0};
+            Vec3f t{up.y*n.z-up.z*n.y, up.z*n.x-up.x*n.z, up.x*n.y-up.y*n.x};
+            Vec3f bt{n.y*t.z-n.z*t.y, n.z*t.x-n.x*t.z, n.x*t.y-n.y*t.x};
+            r.P[0]=p.x; r.P[1]=p.y; r.P[2]=p.z;
+            r.N[0]=n.x; r.N[1]=n.y; r.N[2]=n.z;
+            r.T[0]=t.x; r.T[1]=t.y; r.T[2]=t.z;
+            r.B[0]=bt.x; r.B[1]=bt.y; r.B[2]=bt.z;
+            r.u=v.u; r.v=v.v;
+            const int nb = v.num_weights>0?v.num_weights:1;
+            for (int i=0;i<4;i++){ if (i<nb && i<3){ r.m[i]=v.bone[i]; r.w[i]=v.weight[i]; } else { r.m[i]=0; r.w[i]=0; } }
+            vbuf.push_back(r);
         }
+        for (const auto& tri : m.triangles) { ibuf.push_back((std::uint16_t)(tri.a+base)); ibuf.push_back((std::uint16_t)(tri.b+base)); ibuf.push_back((std::uint16_t)(tri.c+base)); }
+        base += m.vertices.size();
     }
+    std::printf("assembled %d verts / %zu tris\n", (int)vbuf.size(), ibuf.size()/3);
 
-    // Анимации (v49 раскладка, подтверждена на реальном файле).
+    // --- строим поток как BuildSourceMeshOGFStream ---
+    std::vector<std::uint8_t> ogf;
     {
-        std::vector<ANIM_SEQ> seqs;
-        EAnimResult ar = ReadSourceAnims(buf.data(), buf.size(), seqs, V49AnimLayout(), (int)sk.GetBones().size());
-        std::printf("anim reader (v49 layout): %s  (%d seqs)\n", AnimResultName(ar), (int)seqs.size());
-        if (ar == EAnimResult::Ok || ar == EAnimResult::NoSequences)
-        {
-            for (const auto& q : seqs)
-            {
-                std::printf("  seq '%s': numframes=%d fps=%.0f tracks=%d", q.name.c_str(),
-                            q.numframes, q.fps, (int)q.tracks.size());
-                for (const auto& t : q.tracks)
-                    if (!t.frames.empty())
-                        std::printf("  bone%d:%zdf", t.bone, t.frames.size());
-                std::printf("\n");
-            }
-        }
+        // OGF_HEADER
+        OGFHDR h{}; h.format_version = xrOGF_FormatVersion; h.type = MT_SKELETON_GEOMDEF_ST; h.shader_id = 0;
+        float mn[3]={1e30f,1e30f,1e30f}, mx[3]={-1e30f,-1e30f,-1e30f};
+        for (auto& v : vbuf) for (int c=0;c<3;c++){ mn[c]=std::min(mn[c],v.P[c]); mx[c]=std::max(mx[c],v.P[c]); }
+        std::memcpy(h.bbmin,mn,12); std::memcpy(h.bbmax,mx,12);
+        h.bsp_c[0]=(mn[0]+mx[0])*.5f; h.bsp_c[1]=(mn[1]+mx[1])*.5f; h.bsp_c[2]=(mn[2]+mx[2])*.5f;
+        h.bsp_r = std::sqrt((mx[0]-mn[0])*(mx[0]-mn[0])+(mx[1]-mn[1])*(mx[1]-mn[1])+(mx[2]-mn[2])*(mx[2]-mn[2]))*.5f;
+        std::vector<std::uint8_t> hp(reinterpret_cast<std::uint8_t*>(&h), reinterpret_cast<std::uint8_t*>(&h)+sizeof(h));
+        // OGF_TEXTURE
+        std::vector<std::uint8_t> tp; PutCString(tp,"models\\hands\\c_hands"); PutCString(tp,"default");
+        // OGF_VERTICES
+        std::vector<std::uint8_t> vp; Put32(vp,kFVF4L); Put32(vp,(std::uint32_t)vbuf.size());
+        for (auto& v : vbuf){ const std::uint8_t* q=reinterpret_cast<const std::uint8_t*>(&v); vp.insert(vp.end(),q,q+sizeof(V4W)); }
+        // OGF_INDICES
+        std::vector<std::uint8_t> ip; Put32(ip,(std::uint32_t)ibuf.size());
+        ip.insert(ip.end(), reinterpret_cast<const std::uint8_t*>(ibuf.data()), reinterpret_cast<const std::uint8_t*>(ibuf.data())+ibuf.size()*2);
+        PutChunk(ogf,OGF_HEADER,hp); PutChunk(ogf,OGF_TEXTURE,tp); PutChunk(ogf,OGF_VERTICES,vp); PutChunk(ogf,OGF_INDICES,ip);
     }
+    std::printf("ogf stream = %zu bytes\n", ogf.size());
 
-    return ok ? 0 : 1;
+    // --- читаем как CSkeletonX_ST::Load / dxRender_Visual::Load ---
+    std::size_t off,len;
+    check(FindChunk(ogf.data(),ogf.size(),OGF_HEADER,off,len), "OGF_HEADER found");
+    check(len==sizeof(OGFHDR), "OGF_HEADER size == 44");
+    OGFHDR h; std::memcpy(&h,ogf.data()+off,44);
+    check(h.format_version==xrOGF_FormatVersion, "format_version==4");
+    check(h.type==MT_SKELETON_GEOMDEF_ST, "type==MT_SKELETON_GEOMDEF_ST");
+    char buf[128]; std::snprintf(buf,sizeof buf,"shader_id==0 (got %u)",h.shader_id);
+    check(h.shader_id==0, buf);
+    std::snprintf(buf,sizeof buf,"bb x [%.1f..%.1f]",h.bbmin[0],h.bbmax[0]);
+    std::printf("   %s\n", buf);
+
+    check(FindChunk(ogf.data(),ogf.size(),OGF_VERTICES,off,len), "OGF_VERTICES found");
+    std::uint32_t fvf,vc; std::memcpy(&fvf,ogf.data()+off,4); std::memcpy(&vc,ogf.data()+off+4,4);
+    check(fvf==kFVF4L, "fvf==FVF_4L");
+    std::snprintf(buf,sizeof buf,"vCount==%d",(int)vc); check(vc==(std::uint32_t)vbuf.size(), buf);
+
+    std::size_t expectedV = 8 + (std::size_t)vc*sizeof(V4W);
+    std::snprintf(buf,sizeof buf,"vert payload==8+vCount*76 (got %zu, expected %zu)",len,expectedV);
+    check(len==expectedV, buf);
+
+    check(FindChunk(ogf.data(),ogf.size(),OGF_INDICES,off,len), "OGF_INDICES found");
+    std::uint32_t ic; std::memcpy(&ic,ogf.data()+off,4);
+    std::snprintf(buf,sizeof buf,"iCount==%d",(int)ic); check(ic==(std::uint32_t)ibuf.size(), buf);
+    std::size_t expectedI = 4 + (std::size_t)ic*2;
+    std::snprintf(buf,sizeof buf,"idx payload==4+iCount*2 (got %zu, expected %zu)",len,expectedI);
+    check(len==expectedI, buf);
+    // первый индекс
+    std::uint16_t i0; std::memcpy(&i0,ogf.data()+off+4,2);
+    std::snprintf(buf,sizeof buf,"idx[0]==%d",(int)ibuf[0]); check(i0==ibuf[0], buf);
+
+    if (g_fail==0) std::printf("ALL OGF STREAM CHECKS PASSED\n"); else std::printf("%d FAILURE(S)\n",g_fail);
+    return g_fail?1:0;
 }

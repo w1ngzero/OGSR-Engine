@@ -1,98 +1,66 @@
-#include "stdafx.h"
+#pragma once
 //--------------------------------------------------------------------------------------------------
-// source_mdl_mesh_ogf.cpp -- сериализация скин-меша в OGF-контейнеры (чистый модуль, без DX).
+// source_mdl_mesh.h — Чистый (без движка) читатель/конвертер вершин меша Source .MDL -> X-Ray.
 //
-// ФОРМАТ КОНТЕЙНЕРА (точная копия IWriter::open_chunk/close_chunk и IReader::find_chunk,
-// см. xrCore/FS.cpp):
-//     u32 id;      // тип чанка (OGF_VERTICES / OGF_INDICES)
-//     u32 size;    // размер payload в байтах
-//     <payload>
-// Содержимое:
-//   OGF_VERTICES: u32 fvf; u32 vCount;  vertBoned4W[vCount];
-//   OGF_INDICES : u32 count;            u16 index[count];
+// ОБЪЁМ РАУНДА 3 (и честное про что это пока НЕ охватывает):
+//   РАЗОБРАНО:   вершины (позиция, нормаль, UV) + костные веса/bone-индексы, нормализация весов,
+//                применение общего базиса (source_mdl_basis.h), упаковка в X-Ray-вершину,
+//                и синтаксический разбор классического ВСТРОЕННОГО (inline) формата вершин .mdl.
+//   ПОКА НЕ:     современный "split" формат вершин Source v48+/GMod, где геометрия лежит в
+//                ОТДЕЛЬНОМ файле (MODEL_VERTEX_FILE_ID + fixup-таблица) — это отдельный
+//                большой и хрупкий под-модуль (нужен реальный .mdl/.vtx для проверки смещений).
+//                Об этом явно сказано в README; при numbodyparts/указателях на блочные данные,
+//                указывающих в split-файл, парсер сообщает "не поддерживается".
 //
-// vertBoned4W (см. xr_3da/bone.h): { u16 m[4]; Fvector P; Fvector N; Fvector T; Fvector B;
-//                                    float w[3]; float u, v; }  = 8 + 12*4 + 12 + 8 = 76 байт.
-// Порядок и размеры полей воспроизводятся ровно так, чтобы FVisual::Load() (который читает
-// fvf/vCount, затем вершины по FVF::ComputeVertexSize(fvf)) увидел корректный поток.
+//   Важное о версиях: классический inline-формат вершины устойчив, но ПОЛЯ studiohdr_t и
+//   вложенные записи имеют СМЕЩЕНИЯ, зависящие от версии. Чтобы не зашивать неверные числа,
+//   парсер принимает таблицу CLASSIC_LAYOUT (см. source_mdl_mesh_layout.h). Выбор реальных
+//   значений под конкретный ассет и верификация против реальной модели — следующий шаг (см. README).
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_mesh_ogf.h"
-
-#include <cstring>
+#include "source_mdl_basis.h"
+#include <vector>
+#include <string>
+#include <cstdint>
 
 namespace SourceMdl
 {
-namespace
+// Классическая (inline) вершина: до 3 весов (Source) + позиция/нормаль/UV.
+struct MESH_VERTEX
 {
-void Put32(std::vector<std::uint8_t>& b, std::uint32_t v)
+    Vec3f pos;
+    Vec3f normal;
+    float u, v;
+
+    // Исходные (Source) веса/индексы. weights[i] в [0..255], но для классики трактуем как
+    // долю w/255; честная нормализация выполняется в NormalizeWeights().
+    float weight[3];
+    int bone[3];   // индекс кости или -1 (статичная/неиспользуемая)
+    int num_weights;
+};
+
+// Один треугольник меша (ссылки на индексы вершин, локально в пределах меша).
+struct MESH_TRIANGLE
 {
-    b.push_back(static_cast<std::uint8_t>(v & 0xff));
-    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
-    b.push_back(static_cast<std::uint8_t>((v >> 16) & 0xff));
-    b.push_back(static_cast<std::uint8_t>((v >> 24) & 0xff));
-}
-void Put16(std::vector<std::uint8_t>& b, std::uint16_t v)
+    std::uint32_t a, b, c;
+};
+
+// Разобранный меш: обычно один mstudiomesh_t классического .mdl.
+struct MESH
 {
-    b.push_back(static_cast<std::uint8_t>(v & 0xff));
-    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
-}
-void PutF32(std::vector<std::uint8_t>& b, float v)
-{
-    std::uint32_t t;
-    std::memcpy(&t, &v, 4);
-    Put32(b, t);
-}
+    std::vector<MESH_VERTEX> vertices;
+    std::vector<MESH_TRIANGLE> triangles;
+};
 
-void WriteVertex(std::vector<std::uint8_t>& b, const MeshOGFVertex& v)
-{
-    // m[4] (u16)
-    Put16(b, v.m[0]); Put16(b, v.m[1]); Put16(b, v.m[2]); Put16(b, v.m[3]);
-    // P
-    PutF32(b, v.x); PutF32(b, v.y); PutF32(b, v.z);
-    // N
-    PutF32(b, v.nx); PutF32(b, v.ny); PutF32(b, v.nz);
-    // T
-    PutF32(b, v.tx); PutF32(b, v.ty); PutF32(b, v.tz);
-    // B
-    PutF32(b, v.bx); PutF32(b, v.by); PutF32(b, v.bz);
-    // w[3]
-    PutF32(b, v.w[0]); PutF32(b, v.w[1]); PutF32(b, v.w[2]);
-    // u, v
-    PutF32(b, v.u); PutF32(b, v.v);
-}
-} // namespace
+// Нормализует веса до суммы 1.0, обрезает до 4 влияний (X-Ray поддерживает до 4),
+// оставляет пустой слот для 4-го веса если нужно. Возвращает фактическое число влияний (1..4).
+int NormalizeWeights(float weight[4], int bone[4], int in_count);
 
-bool BuildSourceMeshOGF(const std::vector<MeshOGFVertex>& verts,
-                        const std::vector<std::uint16_t>& indices,
-                        std::uint32_t fvf, std::vector<std::uint8_t>& outBuffer)
-{
-    outBuffer.clear();
-    if (verts.empty() || indices.size() < 3)
-        return false;
+// Применяет базис к позиции и нормали (нормаль переводится как вектор, без трансляции).
+void ApplyBasisToVertex(const Basis3& basis, Vec3f& pos, Vec3f& normal);
 
-    // --- OGF_VERTICES ---
-    std::vector<std::uint8_t> vertsPayload;
-    Put32(vertsPayload, fvf);
-    Put32(vertsPayload, static_cast<std::uint32_t>(verts.size()));
-    for (const auto& v : verts)
-        WriteVertex(vertsPayload, v);
+// Заполняет triangle-список из набора индексов (по 3 на треугольник) с проверкой диапазона.
+bool BuildTriangles(const std::uint32_t* indices, std::size_t count, MESH& out);
 
-    // --- OGF_INDICES ---
-    std::vector<std::uint8_t> idxPayload;
-    Put32(idxPayload, static_cast<std::uint32_t>(indices.size()));
-    for (const auto i : indices)
-        Put16(idxPayload, i);
-
-    // --- упаковка ---
-    outBuffer.reserve(8 + vertsPayload.size() + 8 + idxPayload.size());
-    Put32(outBuffer, static_cast<std::uint32_t>(kOGF_VERTICES));
-    Put32(outBuffer, static_cast<std::uint32_t>(vertsPayload.size()));
-    outBuffer.insert(outBuffer.end(), vertsPayload.begin(), vertsPayload.end());
-
-    Put32(outBuffer, static_cast<std::uint32_t>(kOGF_INDICES));
-    Put32(outBuffer, static_cast<std::uint32_t>(idxPayload.size()));
-    outBuffer.insert(outBuffer.end(), idxPayload.begin(), idxPayload.end());
-
-    return true;
-}
+// ВАЖНО про winding: применяемый базис имеет det == +1 (чистый поворот), поэтому реверс
+// порядка вершин в треугольнике НЕ нужен. Проверяется через RequiresWindingOrNormalFlip().
 } // namespace SourceMdl

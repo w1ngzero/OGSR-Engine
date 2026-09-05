@@ -1,49 +1,133 @@
-#pragma once
+#include "stdafx.h"
 //--------------------------------------------------------------------------------------------------
-// source_mdl_anim_decode.h — распаковка постоянных RAW-каналов Source-анимации в float.
-// ЧИСТЫЙ модуль (без движка), проверяемый юнит-тестом.
-//
-// В Source «RAW»-каналы (STUDIO_ANIM_RAWPOS/RAWROT/RAWROT2) описывают НЕВАРЬИРУЕМУЮ во времени
-// часть анимации: в файле лежит ОДНО значение (поворот/сдвиг), общее для всех кадров
-// последовательности. «Сжатые» каналы (ANIMPOS/ANIMROT, RLE) — варьируемая часть, они в этом
-// модуле не раскрываются (у реального ассета их нет; см. VERIFICATION.md).
-//
-// Форматы:
-//   Quaternion64 (RAWROT2, 8 байт): три 21-битных компонента x,y,z со смещением 2^20 + 1 бит
-//     знака w. Распаковка (см. реализацию): x=(v-2^20)/2^20.5; w = sqrt(1-x^2-y^2-z^2),
-//     знак w — по старшему биту. ПРОВЕРЕНО на реальном gfl2_asteria_arms.mdl: даёт единичный
-//     кватернион.
-//   Quaternion48 (RAWROT, 6 байт): три 16-битных x,y,z; w вычисляется из условия нормы=1.
-//   Vector48 (RAWPOS, 6 байт): три 16-битных x,y,z (сдвиг, масштаб 1/32768).
+// source_mdl_anim_decode.cpp — распаковка RAW-каналов (см. source_mdl_anim_decode.h).
 //--------------------------------------------------------------------------------------------------
-#include "source_mdl_anim_q.h"
-#include <cstdint>
-#include <cstddef>
-#include <vector>
+#include "source_mdl_anim_decode.h"
+#include <cmath>
+#include <cstring>
 
 namespace SourceMdl
 {
-// Распаковать RAWROT2 (Quaternion64, 8 байт) в кватернион.
-bool DecodeQuaternion64(const std::uint8_t* raw8, AnimQ::Quat4& out);
+bool DecodeQuaternion64(const std::uint8_t* raw8, AnimQ::Quat4& out)
+{
+    if (!raw8)
+        return false;
 
-// Распаковать RAWROT (Quaternion48, 3 x int16) в кватернион.
-bool DecodeQuaternion48(const std::int16_t raw3[3], AnimQ::Quat4& out);
+    // 64-битное значение: три компонента по 21 биту (x,y,z) + 1 бит знака w.
+    // Смещение компонента 2^20 = 1048576; масштаб 1/1048576.5 -> диапазон ~(-1,1).
+    std::uint64_t v = 0;
+    std::memcpy(&v, raw8, 8);
 
-// Распаковать RAWPOS (Vector48, 3 x int16) в сдвиг.
-AnimQ::Vec3 DecodeVector48(const std::int16_t raw3[3]);
+    const std::uint64_t cx = (v & 0x1FFFFFu);
+    const std::uint64_t cy = ((v >> 21) & 0x1FFFFFu);
+    const std::uint64_t cz = ((v >> 42) & 0x1FFFFFu);
+    const bool wneg = ((v >> 63) & 0x1) != 0;
 
-// Распаковать RLE-поток mstudioanimvalue_t в per-frame значения SAMPLE (int16).
-// Формат (подтверждён по SourceIO / мстрелке Valve; см. source_mdl_anim_decode.cpp):
-//   последовательность байтовых пар (valid, total). Для каждой пары:
-//     - valid: сколько НОВЫХ значений (int16) читается подряд (первые кадры сегмента);
-//     - total-valid: сколько следующих кадров ПОВТОРЯЮТ последнее прочитанное значение.
-//   Признак конца — frameOffset >= frameCount.
-//   raw8/raw16 — указатель на начало RLE-потока; frameCount — число кадров.
-// Возвращает false, если поток раньше времени закончился (мальформированный).
+    constexpr float kOff = 1048576.0f;   // 2^20
+    constexpr float kScale = 1048576.5f; // смещение + полшага -> 1/|x|<1
+    const float x = (static_cast<float>(cx) - kOff) / kScale;
+    const float y = (static_cast<float>(cy) - kOff) / kScale;
+    const float z = (static_cast<float>(cz) - kOff) / kScale;
+
+    float w2 = 1.0f - x * x - y * y - z * z;
+    if (w2 < 0.0f)
+        w2 = 0.0f; // численная устойчивость (хвост ошибки округления)
+    float w = std::sqrt(w2);
+    if (wneg)
+        w = -w;
+
+    out.x = x; out.y = y; out.z = z; out.w = w;
+    return true;
+}
+
+bool DecodeQuaternion48(const std::int16_t raw3[3], AnimQ::Quat4& out)
+{
+    if (!raw3)
+        return false;
+    // 3 x 16-бит со знаком; компоненты в диапазоне ~(-1,1), w из нормы=1.
+    constexpr float kScale = 32767.5f;
+    const float x = raw3[0] / kScale;
+    const float y = raw3[1] / kScale;
+    const float z = raw3[2] / kScale;
+    float w2 = 1.0f - x * x - y * y - z * z;
+    if (w2 < 0.0f)
+        w2 = 0.0f;
+    out.x = x; out.y = y; out.z = z; out.w = std::sqrt(w2);
+    return true;
+}
+
+AnimQ::Vec3 DecodeVector48(const std::int16_t raw3[3])
+{
+    constexpr float kScale = 32768.0f;
+    return {raw3[0] / kScale, raw3[1] / kScale, raw3[2] / kScale};
+}
+
 bool DecodeRLEShorts(const std::uint8_t* rle, std::size_t rleSize, int frameCount,
-                     std::vector<std::int16_t>& outFrames);
+                     std::vector<std::int16_t>& outFrames)
+{
+    outFrames.clear();
+    if (!rle || frameCount <= 0)
+        return false;
+    outFrames.assign(static_cast<std::size_t>(frameCount), 0);
 
-// Распаковать RLE-поток в per-frame SCALED значения (float) — умножение на scale.
+    std::size_t pos = 0;       // текущее смещение в RLE-потоке (байты)
+    int frameOffset = 0;       // сколько кадров уже заполнено
+
+    auto read8 = [&](std::uint8_t& x) -> bool {
+        if (pos + 1 > rleSize) return false;
+        x = rle[pos++];
+        return true;
+    };
+    auto read16 = [&](std::int16_t& x) -> bool {
+        if (pos + 2 > rleSize) return false;
+        std::memcpy(&x, rle + pos, 2);
+        pos += 2;
+        return true;
+    };
+
+    std::uint8_t valid = 0, total = 0;
+    if (!read8(valid) || !read8(total))
+        return false;
+
+    while (frameOffset < frameCount)
+    {
+        // 1) 'valid' свежих значений.
+        for (int i = 0; i < valid && frameOffset < frameCount; ++i)
+        {
+            std::int16_t v = 0;
+            if (!read16(v))
+                return false;
+            outFrames[static_cast<std::size_t>(frameOffset)] = v;
+            frameOffset++;
+        }
+        // 2) 'total - valid' повторов последнего значения.
+        const int repeat = static_cast<int>(total) - static_cast<int>(valid);
+        if (repeat > 0 && frameOffset > 0)
+        {
+            const std::int16_t last = outFrames[static_cast<std::size_t>(frameOffset - 1)];
+            for (int i = 0; i < repeat && frameOffset < frameCount; ++i)
+            {
+                outFrames[static_cast<std::size_t>(frameOffset)] = last;
+                frameOffset++;
+            }
+        }
+        if (frameOffset >= frameCount)
+            break;
+        if (!read8(valid) || !read8(total))
+            return false;
+    }
+    return true;
+}
+
 bool DecodeAnimValues(const std::uint8_t* rle, std::size_t rleSize, int frameCount, float scale,
-                      std::vector<float>& outFrames);
+                      std::vector<float>& outFrames)
+{
+    std::vector<std::int16_t> shorts;
+    if (!DecodeRLEShorts(rle, rleSize, frameCount, shorts))
+        return false;
+    outFrames.assign(shorts.size(), 0.0f);
+    for (std::size_t i = 0; i < shorts.size(); ++i)
+        outFrames[i] = static_cast<float>(shorts[i]) * scale;
+    return true;
+}
 } // namespace SourceMdl
