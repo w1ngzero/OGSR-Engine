@@ -1,3 +1,4 @@
+#include "stdafx.h"
 //--------------------------------------------------------------------------------------------------
 // source_mdl_skeleton.cpp -- implements the Source .MDL skeleton reader declared in the header.
 // See source_mdl_skeleton.h for the design notes of this Round-1 milestone.

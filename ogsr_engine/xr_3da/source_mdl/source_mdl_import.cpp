@@ -40,10 +40,6 @@ bool ReadFileToBuffer(const char* baseName, const char* ext, xr_string& bufOut)
     return true;
 }
 
-Fvector3 TransformV(const Fmatrix& basis, const Vec3f& v)
-{
-    return Fvector3().set(basis.transform_tiny(Fvector3().set(v.x, v.y, v.z)));
-}
 } // namespace
 
 bool TryImportSourceMesh(const char* modelName, SourceMeshImport& out)
@@ -144,7 +140,6 @@ bool TryImportSourceMesh(const char* modelName, SourceMeshImport& out)
         (int)out.verts.size(), (int)out.numTriangles, base, root, (int)out.boneMap.size());
     return true;
 }
-} // namespace SourceMdl
 
 bool TryImportSourceSkeleton(const char* modelName, vecBones& outBones, int& outRoot)
 {
@@ -259,7 +254,7 @@ bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureNa
     PutCString(texPayload, shaderName);
 
     // --- OGF_VERTICES ---
-    constexpr std::uint32_t kFVF4L = 5u * 0x12071980u; // OGF_VERTEXFORMAT_FVF_4L
+    constexpr std::uint32_t kFVF4L = OGF_VERTEXFORMAT_FVF_4L; // из fmesh.h, точное значение
     std::vector<std::uint8_t> vertsPayload;
     Put32(vertsPayload, kFVF4L);
     Put32(vertsPayload, static_cast<std::uint32_t>(imp.verts.size()));
