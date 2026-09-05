@@ -49,8 +49,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ogsr-engine-bin-%CONFIG%-%PLATFORM%
-          path: |
-            bin_%PLATFORM%/**
+          path: 'bin_${{ env.PLATFORM }}/**'
           if-no-files-found: error
 
       - name: Upload build log on failure
