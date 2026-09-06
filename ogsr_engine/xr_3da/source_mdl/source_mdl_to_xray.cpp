@@ -97,11 +97,15 @@ bool BuildEngineSkeleton(const CSourceMdlSkeleton& src, vecBones& outBones, int&
         B->IK_data.Reset();
         B->mass = 1.f;
         B->center_of_mass.set(s.pos.x, s.pos.y, s.pos.z);
-        // Empty game_mtl_name on purpose: CGamePersistent::RegisterModel() for MT_SKELETON_RIGID
-        // checks each bone; if game_mtl_name is non-empty it must resolve to a *dynamic* game
-        // material or it asserts ("Required dynamic game material"). Leaving it empty makes
-        // RegisterModel fall through to the dynamic 'default_object' material instead.
-        B->game_mtl_name = "";
+        // Give every Source bone a *valid, dynamic* game material. CGamePersistent::RegisterModel()
+        // for MT_SKELETON_RIGID walks each bone and, if game_mtl_name is non-empty, resolves it and
+        // asserts it is dynamic ("Required dynamic game material"). 'default_object' is the engine's
+        // dynamic default (RegisterModel itself asserts it is dynamic), so resolving to it passes.
+        //
+        // NOTE: do NOT use an empty string here. shared_str docks "" through the string container and
+        // can come back as a NULL shared_str; `*(bd.game_mtl_name)` in RegisterModel then derefs NULL
+        // (ub) and calls GetMaterialIdx("") -> invalid/material 0 -> the dynamic-material assert.
+        B->game_mtl_name = "default_object";
         B->game_mtl_idx = 0;
     }
 
