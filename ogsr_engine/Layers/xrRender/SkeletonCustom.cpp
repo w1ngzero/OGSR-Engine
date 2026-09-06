@@ -385,6 +385,14 @@ void CKinematics::Load(const char* N, IReader* data, const u32 dwFlags)
         R_ASSERT2(has_ogf_bones, "Model has no X-Ray skeleton (OGF_S_BONE_NAMES) and Source skeleton import is off or failed.");
     }
 
+    // _CollectBoneFaces (via CSkeletonX_ST/PM::AfterLoad) does child_faces[child_idx].push_back(...)
+    // for every vertex. The vanilla bone-reader pre-sizes child_faces per bone to children.size();
+    // our Source importer creates bones without that, so ensure every bone has the right capacity here
+    // (idempotent: flat-resize to the current child count, never shrinks below what's needed).
+    for (const auto& B : *bones)
+        if (B->child_faces.size() < children.size())
+            B->child_faces.resize(children.size());
+
     // after load process
     {
         for (u16 child_idx = 0; child_idx < static_cast<u16>(children.size()); child_idx++)
