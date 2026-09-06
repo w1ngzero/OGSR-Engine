@@ -73,6 +73,45 @@ Built make3Bone()
     return b;
 }
 
+// ---- synthetic multi-root skeleton (hands + weapon, viewmodel) ------------------------
+Built makeMultiRoot()
+{
+    Built b;
+    b.boneIndex = 164;
+    struct Rec { const char* name; int parent; float p[3], q[4]; };
+    const float c = 0.70710678f;
+    // два независимых под-дерева: руки (origin->arm) и оружие (weapon->blade)
+    Rec recs[4] = {
+        {"origin", -1, {0,0,0}, {0,0,0,1}},
+        {"arm",     0, {0,10,0}, {0,0,c,c}},
+        {"weapon", -1, {0,5,0}, {0,0,0,1}},
+        {"blade",   2, {0,20,0}, {0,0,0,1}},
+    };
+    const std::size_t nameBase = b.boneIndex + 4 * kStride;
+    std::size_t total = nameBase;
+    for (int i = 0; i < 4; ++i) total += std::strlen(recs[i].name) + 1;
+    b.buf.assign(total, 0);
+    put32(b.buf, 0, (std::int32_t)0x54534449u);
+    put32(b.buf, 4, 47);
+    std::memcpy(&b.buf[12], "viewmdl", 7);
+    put32(b.buf, 156, 4);
+    put32(b.buf, 160, (std::int32_t)b.boneIndex);
+    std::size_t cur = nameBase;
+    for (int i = 0; i < 4; ++i)
+    {
+        std::size_t off = b.boneIndex + (std::size_t)i * kStride;
+        put32(b.buf, off + 0, (std::int32_t)(cur - off));
+        put32(b.buf, off + 4, recs[i].parent);
+        putF(b.buf, off + 32, recs[i].p[0], recs[i].p[1], recs[i].p[2]);
+        putF2(b.buf, off + 44, recs[i].q[0], recs[i].q[1], recs[i].q[2], recs[i].q[3]);
+        float one = 1.f;
+        for (int k = 0; k < 6; ++k) std::memcpy(&b.buf[off + 72 + k * 4], &one, 4);
+        std::memcpy(&b.buf[cur], recs[i].name, std::strlen(recs[i].name));
+        cur += std::strlen(recs[i].name) + 1;
+    }
+    return b;
+}
+
 // ---- synthetic inline mesh (Round 3) --------------------------------------------------
 // Один bodypart, одна модель, один меш, N вершин, один треугольник.
 struct MeshBuilt { std::vector<std::uint8_t> buf; };
@@ -150,6 +189,40 @@ int main()
     CHECK(near(bones[1].model_bind.m[0][0], 0.f) && near(bones[1].model_bind.m[0][1], -1.f));
     CHECK(near(bones[1].model_bind.m[3][1], 10.f));
     CHECK(near(bones[2].model_bind.m[3][0], 5.f) && near(bones[2].model_bind.m[3][1], 10.f));
+
+    // ===== Round 10: multi-root (viewmodel: руки + оружие) =====
+    std::printf("== Round 10: multi-root skeleton (hands + weapon) ==\n");
+    {
+        Built m = makeMultiRoot();
+        CSourceMdlSkeleton mv;
+        CHECK(mv.Parse(m.buf.data(), m.buf.size()));          // больше НЕ падает на 2 корнях
+        const auto& mb = mv.GetBones();
+        CHECK(mb.size() == 4);
+        CHECK(mv.GetRootMulti().size() == 2);                 // origin, weapon
+        CHECK(mv.RootIndex() == 0);                           // главный корень = первый
+        CHECK(mb[2].is_root && mb[2].name == "weapon");
+
+        // Базы независимы: bind обоих корней = их локальные трансформы.
+        CHECK(near(mb[0].model_bind.m[3][1], 0.f));
+        CHECK(near(mb[2].model_bind.m[3][1], 5.f));           // weapon позиционирован отдельно
+        CHECK(near(mb[3].model_bind.m[3][1], 25.f));          // blade под weapon (5+20)
+
+        // Приводим к единому дереву БЕЗ переименования индексов.
+        CSourceMdlSkeleton single = mv;
+        CHECK(single.BakeSingleRoot());
+        const auto& sb = single.GetBones();
+        CHECK(sb.size() == 5);                                // +1 синтетический корень
+        CHECK(single.RootIndex() == 4);                       // новый корень в конце
+        CHECK(sb[4].name == "skeleton_root");
+        CHECK(!sb[0].is_root && sb[0].parent == 4);           // старые корни пере-подвешены
+        CHECK(!sb[2].is_root && sb[2].parent == 4);
+        CHECK(single.GetRootMulti().size() == 1);
+        // Bind старых корней не изменился (ребро к новому корню = identity).
+        CHECK(near(sb[2].model_bind.m[3][1], 5.f));
+        CHECK(near(sb[3].model_bind.m[3][1], 25.f));
+        CHECK(near(sb[4].model_bind.m[3][0], 0.f));            // новый корень в начале координат
+        CHECK(near(sb[4].model_bind.m[0][0], 1.f));            // identity-поворот
+    }
 
     // ===== Round 3: basis =====
     std::printf("== Round 3: basis Source->X-Ray ==\n");

@@ -61,7 +61,49 @@ int main(int argc, char** argv)
     if (ok)
     {
         const auto& bones = sk.GetBones();
-        std::printf("bones: %d, root=%d\n", (int)bones.size(), sk.RootIndex());
+        const auto& roots = sk.GetRootMulti();
+        std::printf("bones: %d, root=%d, roots=%d\n", (int)bones.size(), sk.RootIndex(), (int)roots.size());
+        if (roots.size() > 1)
+        {
+            std::printf("  multi-root skeleton: независимых под-деревьев %d (руки+оружие и т.п.)\n", (int)roots.size());
+            for (size_t ri = 0; ri < roots.size() && ri < 8; ++ri)
+                std::printf("    root[%zu] = bone %d '%s'\n", ri, roots[ri], bones[(size_t)roots[ri]].name.c_str());
+            // Показываем, что скелет приводится к ЕДИНОМУ дереву без переименования индексов.
+            CSourceMdlSkeleton single = sk;
+            // Сохраняем bind-матрицы старых корней до выпекания.
+            std::vector<mat4> preBind(roots.size());
+            for (size_t ri = 0; ri < roots.size(); ++ri)
+                preBind[ri] = bones[(size_t)roots[ri]].model_bind;
+            bool baked = single.BakeSingleRoot();
+            std::printf("  BakeSingleRoot(): %s  -> bones=%d, single root=%d '%s'\n",
+                        baked ? "OK" : "FAIL",
+                        (int)single.GetBones().size(), single.RootIndex(),
+                        single.GetBones()[(size_t)single.RootIndex()].name.c_str());
+            // Проверка: старые корни сохранили свои model_bind, новый корень = identity (в начале).
+            int bindOk = 0;
+            const auto& sb = single.GetBones();
+            for (size_t ri = 0; ri < roots.size(); ++ri)
+            {
+                const mat4& a = preBind[ri];
+                const mat4& b = sb[(size_t)roots[ri]].model_bind;
+                bool same = true;
+                for (int r = 0; r < 4 && same; ++r)
+                    for (int c = 0; c < 4 && same; ++c)
+                        if (std::fabs(a.m[r][c] - b.m[r][c]) > 1e-4f)
+                            same = false;
+                if (same)
+                    ++bindOk;
+            }
+            const mat4& rootBind = sb[(size_t)single.RootIndex()].model_bind;
+            bool rootIdentity = (std::fabs(rootBind.m[0][0] - 1.f) < 1e-4f &&
+                                 std::fabs(rootBind.m[1][1] - 1.f) < 1e-4f &&
+                                 std::fabs(rootBind.m[2][2] - 1.f) < 1e-4f &&
+                                 std::fabs(rootBind.m[3][0]) < 1e-4f &&
+                                 std::fabs(rootBind.m[3][1]) < 1e-4f &&
+                                 std::fabs(rootBind.m[3][2]) < 1e-4f);
+            std::printf("  bind preserved: %d/%d old roots intact, new root identity: %s\n",
+                        bindOk, (int)roots.size(), rootIdentity ? "YES" : "no");
+        }
         for (size_t i = 0; i < bones.size() && i < 8; ++i)
         {
             const BONE& b = bones[i];
@@ -263,6 +305,22 @@ int main(int argc, char** argv)
                     if (!t.frames.empty())
                         std::printf("  bone%d:%zdf", t.bone, t.frames.size());
                 std::printf("\n");
+            }
+
+            // Контрольный прогон с ЯВНОЙ нестандартной раскладкой V49AnimLayout100 (страйд 100).
+            // У GMod-моделей (v_knife/v_akilo47) она даёт тот же результат, что и авто-детект
+            // страйда внутри V49AnimLayout; у стандартной v49 (gfl2) авто-детект возвращает 92.
+            if (argc >= 2)
+            {
+                std::vector<ANIM_SEQ> s100;
+                EAnimResult a100 = ReadSourceAnims(buf.data(), buf.size(), s100, V49AnimLayout100(), (int)sk.GetBones().size());
+                std::printf("  (explicit V49AnimLayout100): %s  (%d seqs)\n", AnimResultName(a100), (int)s100.size());
+                std::size_t maxf = 0;
+                for (const auto& q : s100)
+                    for (const auto& t : q.tracks)
+                        if (t.frames.size() > maxf)
+                            maxf = t.frames.size();
+                std::printf("      max frames decoded = %zu\n", maxf);
             }
         }
     }

@@ -45,6 +45,24 @@ static void CopyBind(const mat4& src, Fmatrix& dst)
 //   outBones  -- filled with new CBoneData* in the SAME index order as src.GetBones()
 //   outRoot   -- index of the root bone, or -1
 //   basis     -- change-of-basis from Source model space to X-Ray model space (see note above)
+// Build engine CBoneData records (caller owns the returned pointers; true on success).
+//
+// The engine consumes the tree via CBoneData::CalculateM2B, which accumulates
+//   acc[child] = mul_43(acc[parent], bind[child])   (Fmatrix::mul_43(A,B) == B*A, see _matrix.h)
+// and then m2b = inverse(acc). So bind_transform MUST be the LOCAL (parent-relative) transform,
+// and the whole hierarchy MUST be a single tree (CalculateM2B recurses from one root).
+//
+// We therefore:
+//   * compute each bone's model-space frame in the engine frame:  mx[i] = model_bind_source[i] * basis;
+//   * UNIFY multi-root skeletons into a single tree rooted at the primary bone (index 0 when it is a
+//     root, else the smallest root index) by re-parenting the other roots under it, preserving each
+//     bone's model-space frame via exact inverse composition:
+//         bind[primary] = mx[primary];
+//         bind[child]   = mx[child] * inverse(mx[parent]);   // local, parent-relative
+//   * let the engine's CalculateM2B recover the correct model frame for EVERY bone.
+//
+// No new bones are added and existing bone indices are NOT renumbered, so the vertex weights
+// (global Source bone indices from .vtx) stay valid with the identity boneMap.
 bool BuildEngineSkeleton(const CSourceMdlSkeleton& src, vecBones& outBones, int& outRoot,
                          const Fmatrix& basis)
 {
@@ -52,43 +70,69 @@ bool BuildEngineSkeleton(const CSourceMdlSkeleton& src, vecBones& outBones, int&
     outRoot = -1;
 
     const auto& bones = src.GetBones();
-    if (bones.empty())
+    const auto& roots = src.GetRootMulti();
+    const std::size_t n = bones.size();
+    if (n == 0)
         return false;
 
-    // Allocate engine bones.
-    outBones.reserve(bones.size());
-    for (std::size_t i = 0; i < bones.size(); ++i)
+    // Primary (engine) root: prefer index 0 (the engine's Spawn() calls LL_SetBoneRoot(0)),
+    // otherwise the smallest root index.
+    int primary = -1;
+    for (int r : roots)
+        if (primary < 0 || r < primary)
+            primary = r;
+    if (primary < 0)
+        primary = 0;
+    if (roots.size() >= 1 && roots[0] == 0) // if bone 0 is a root, it's the engine root
+        primary = 0;
+
+    // Allocate bones.
+    outBones.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
         outBones.push_back(xr_new<CBoneData>(static_cast<u16>(i)));
 
-    // Fill names, bind transforms and hierarchy. bind_transform already carries the Source
-    // model-space frame + change-of-basis, so it is consistent for the whole skeleton.
-    for (std::size_t i = 0; i < bones.size(); ++i)
+    // model-space frame in the engine (row-vector) system: mx[i] = model_bind_source[i] * basis.
+    std::vector<Fmatrix> mx(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        Fmatrix model;
+        CopyBind(bones[i].model_bind, model);
+        mx[i].mul_43(basis, model); // == model * basis
+    }
+
+    // Fill names, hierarchy and (LOCAL) bind transforms.
+    for (std::size_t i = 0; i < n; ++i)
     {
         const BONE& s = bones[i];
         CBoneData* B = outBones[i];
 
         B->name = s.name.c_str();
 
-        // bind_xray = basis * model_bind_source  (translation row-3 in both).
-        Fmatrix model;
-        CopyBind(s.model_bind, model);
-        B->bind_transform.mul_43(basis, model);
+        // New parent in the unified single-root tree.
+        const int parent = (s.is_root) ? ((static_cast<int>(i) == primary) ? -1 : primary)
+                                       : s.parent;
 
-        // Hierarchy.
-        if (s.is_root)
+        if (parent >= 0)
         {
-            outRoot = static_cast<int>(i);
-            B->SetParentID(BI_NONE);
+            Fmatrix inv;
+            Fmatrix tmp;
+            if (tmp.invert_b(mx[static_cast<std::size_t>(parent)]))
+                inv.set(tmp);
+            else
+                inv.set(Fidentity); // деградация для вырожденной матрицы (не должно случаться)
+            // bind = mx[child] * inv(mx[parent])  ->  mul_43(inv, mx[child]).
+            B->bind_transform.mul_43(inv, mx[i]);
+
+            B->SetParentID(static_cast<u16>(parent));
+            outBones[static_cast<std::size_t>(parent)]->children.push_back(B);
         }
         else
         {
-            CBoneData* P = outBones[static_cast<std::size_t>(s.parent)];
-            B->SetParentID(static_cast<u16>(s.parent));
-            P->children.push_back(B);
+            B->bind_transform.set(mx[i]); // единственный корень: локальная = модельная
+            B->SetParentID(BI_NONE);
         }
 
-        // Decompose the rest pose into the classic X-Ray euler/linear form too, so both the
-        // "raw matrix" consumers and the "classic params" consumers agree on the same pose.
+        // Local euler/linear pose (now genuinely local to the parent).
         B->bind_transform.getXYZi(B->rotation);
         B->bind_transform.getXYZi(B->position);
 
@@ -97,22 +141,15 @@ bool BuildEngineSkeleton(const CSourceMdlSkeleton& src, vecBones& outBones, int&
         B->IK_data.Reset();
         B->mass = 1.f;
         B->center_of_mass.set(s.pos.x, s.pos.y, s.pos.z);
-        // Give every Source bone a *valid, dynamic* game material. CGamePersistent::RegisterModel()
-        // for MT_SKELETON_RIGID walks each bone and, if game_mtl_name is non-empty, resolves it and
-        // asserts it is dynamic ("Required dynamic game material"). 'default_object' is the engine's
-        // dynamic default (RegisterModel itself asserts it is dynamic), so resolving to it passes.
-        //
-        // NOTE: do NOT use an empty string here. shared_str docks "" through the string container and
-        // can come back as a NULL shared_str; `*(bd.game_mtl_name)` in RegisterModel then derefs NULL
-        // (ub) and calls GetMaterialIdx("") -> invalid/material 0 -> the dynamic-material assert.
         B->game_mtl_name = "default_object";
         B->game_mtl_idx = 0;
     }
 
-    // Model->bone (m2b) transforms after the whole tree exists.
-    if (outRoot >= 0)
-        outBones[static_cast<std::size_t>(outRoot)]->CalculateM2B(Fidentity);
+    // Model->bone (m2b) transforms after the whole single-root tree exists.
+    if (primary >= 0 && static_cast<std::size_t>(primary) < n)
+        outBones[static_cast<std::size_t>(primary)]->CalculateM2B(Fidentity);
 
+    outRoot = primary;
     return true;
 }
 } // namespace SourceMdl

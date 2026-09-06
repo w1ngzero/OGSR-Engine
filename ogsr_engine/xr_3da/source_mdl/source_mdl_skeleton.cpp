@@ -118,6 +118,7 @@ bool CSourceMdlSkeleton::Parse(const void* data, std::size_t size)
 {
     m_bones.clear();
     m_root = -1;
+    m_roots.clear();
     m_error.clear();
 
     if (!data || size < 164)
@@ -203,12 +204,9 @@ bool CSourceMdlSkeleton::Parse(const void* data, std::size_t size)
         bone.is_root = (parent == -1);
         if (bone.is_root)
         {
-            if (m_root != -1)
-            {
-                m_error = "multiple root bones";
-                return false;
-            }
-            m_root = i;
+            if (m_root == -1)
+                m_root = i; // первый найденный корень — назначенный/главный
+            m_roots.push_back(i);
         }
         else if (parent < 0 || parent >= numBones)
         {
@@ -287,6 +285,52 @@ void CSourceMdlSkeleton::ComputeBindMatrices()
             if (!d)
                 ++remaining;
     }
+}
+
+bool CSourceMdlSkeleton::BakeSingleRoot(const std::string& rootName)
+{
+    if (m_bones.empty())
+        return false;
+
+    // Если корень уже один — ничего делать не нужно.
+    if (m_roots.size() <= 1)
+    {
+        m_root = m_roots.empty() ? -1 : m_roots[0];
+        ComputeBindMatrices();
+        return true;
+    }
+
+    // Добавляем синтетический корень В КОНЕЦ массива (индекс == прежнему числу костей),
+    // чтобы не сдвигать индексы существующих костей (на них ссылаются веса вершин из .vtx).
+    const int newRoot = static_cast<int>(m_bones.size());
+
+    BONE synth;
+    synth.name = rootName;
+    for (auto& c : synth.name)
+        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    synth.parent = -1;
+    synth.is_root = true;
+    synth.pos = {0.f, 0.f, 0.f};
+    synth.rotation = {0.f, 0.f, 0.f, 1.f}; // identity
+    synth.pos_scale = {1.f, 1.f, 1.f};
+    synth.rot_scale = {1.f, 1.f, 1.f};
+    synth.flags = 0;
+    std::memset(&synth.model_bind, 0, sizeof(synth.model_bind));
+    m_bones.push_back(synth);
+
+    // Подвешиваем старые корни под новый с ИДЕНТИЧНЫМ локальным трансформом (не меняет их
+    // model_bind): их локальная поза остаётся, а parent теперь = newRoot.
+    for (const int r : m_roots)
+    {
+        m_bones[static_cast<std::size_t>(r)].parent = newRoot;
+        m_bones[static_cast<std::size_t>(r)].is_root = false;
+    }
+
+    m_root = newRoot;
+    m_roots.clear();
+    m_roots.push_back(newRoot);
+    ComputeBindMatrices();
+    return true;
 }
 
 void CSourceMdlSkeleton::Dump() const

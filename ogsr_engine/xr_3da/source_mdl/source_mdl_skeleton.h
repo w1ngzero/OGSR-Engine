@@ -92,15 +92,31 @@ class CSourceMdlSkeleton
 public:
     //! Parse the studiohdr_t + bone array from a raw memory buffer.
     //! Returns false and leaves a diagnostic in GetLastError() on malformed data.
+    //! NOTE: multiple root bones are now ACCEPTED (independent sub-trees, e.g. a viewmodel's
+    //! hands + weapon). See GetRootMulti() for the list of roots.
     bool Parse(const void* data, std::size_t size);
 
     const std::vector<BONE>& GetBones() const { return m_bones; }
+    //! Primary/designated root (first found). Kept for back-compat.
     int RootIndex() const { return m_root; }
+    //! All root-bone indices (multi-root skeletons have >1; viewmodels = hands + weapon).
+    const std::vector<int>& GetRootMulti() const { return m_roots; }
     const std::string& GetLastError() const { return m_error; }
 
     //! Rebuild m_bones[i].model_bind from the local pos/quat + parent hierarchy.
     //! (Idempotent; called automatically at the end of Parse().)
     void ComputeBindMatrices();
+
+    //! Добавляет ОДИН синтетический корневой узел и подвешивает под него все независимые
+    //! корни существующих под-деревьев (viewmodel = руки + оружие), чтобы скелет стал единым
+    //! деревом (требование X-Ray CBoneData / CKinematics).
+    //!
+    //! КРИТИЧНО: новый корень добавляется В КОНЕЦ массива костей (индекс == прежнему числу
+    //! костей), поэтому индексы существующих костей, на которые ссылаются вершинные веса из
+    //! .vtx (boneWeightIndex), НЕ ПЕРЕНОМЕРОВЫВАЮТСЯ. Идентичные локальные трансформы
+    //! (pos=0, identity-кватернион) у новых ребёр не меняют model_bind старых корней.
+    //!                  Возвращает false при отсутствии костей.
+    bool BakeSingleRoot(const std::string& rootName = "skeleton_root");
 
     //! Sanity helper used by tests / console dumps: print a bone dump to stdout.
     void Dump() const;
@@ -108,6 +124,7 @@ public:
 private:
     std::vector<BONE> m_bones;
     int m_root = -1;
+    std::vector<int> m_roots; // indices of all root bones (parent == -1)
     std::string m_error;
 
     bool ReadName(const std::uint8_t* base, std::uint32_t offset, std::string& out,
