@@ -594,6 +594,9 @@ u32 attachable_hud_item::anim_play(const shared_str& anm_name_b, BOOL bMixIn, co
     ASSERT_FMT(anm, "model [%s] has no motion alias defined [%s]", m_visual_name.c_str(), anim_name_r);
     ASSERT_FMT(anm->m_animations.size(), "model [%s] has no motion defined in motion_alias [%s]", m_visual_name.c_str(), anim_name_r);
 
+    // [diagnostics] показываем, какой alias и секвенцию реально играем
+    Msg("~~[anim_play] alias='%s' base='%s' anims=%d (hasSeparated=%d)", anim_name_r, anm->m_base_name.c_str(), (int)anm->m_animations.size(), m_has_separated_hands ? 1 : 0);
+
     u8 rnd_idx = 0;
 
     if (randomAnim)
@@ -649,6 +652,7 @@ u32 attachable_hud_item::anim_play(const shared_str& anm_name_b, BOOL bMixIn, co
         }
 
         u16 pc = ka->partitions().count();
+        Msg("~~[anim_play] seq='%s' idx=%u valid=%d parts=%u motiondef=%d stopAtEnd=%d", M.name.c_str(), (unsigned)M2.idx, M2.valid() ? 1 : 0, (unsigned)pc, md ? 1 : 0, (md && (md->flags & 2)) ? 1 : 0);
         for (u16 pid = 0; pid < pc; ++pid)
         {
             CBlend* B = ka->PlayCycle(pid, M2, bMixIn);
