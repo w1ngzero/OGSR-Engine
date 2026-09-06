@@ -333,3 +333,99 @@ Everything compiled; only the final link of `xrEngine.exe` failed:
   `namespace SourceMdl { extern ...; }` and reference as `&SourceMdl::psSourceSkeletonMode` /
   `&SourceMdl::psSourceMeshMode` in the CCC_Integer registrations. SkeletonCustom.cpp already used
   them correctly as `SourceMdl::`.
+
+## Round 9 — ИМПОРТ РАБОТАЕТ В ИГРЕ (подтверждено в игре)
+- `[SourceSkeleton] imported skeleton for ... [importer-v2]` — скелет из `.mdl` (49 костей).
+- `[SourceMesh] imported 12487 verts / 16828 tris` — геометрия `.vvd` + `.dx90.vtx` подхвачена.
+- `[SourceMesh] attached ... to '...'` — прикреплена как дочерний CSkeletonX_ST.
+- Меш появился в игре; краши сняты последовательно:
+  1. `FHierrarhyVisual::Load` Invalid visual -> добавлен OGF_CHILDREN в заглушку-ogf.
+  2. `_CollectBoneFaces` access violation -> `child_faces.resize(children.size())` для всех костей.
+  3. `Required dynamic game material` -> `game_mtl_name = "default_object"` (пустая строка в shared_str даёт nullptr-UB).
+- Вторичные (не-критичные) следы для следующего раунда:
+  - `! Can't find texture [models\hands\c_hands]` (нет текстуры).
+  - `!Can't write file: ...\shaders_cache\...` (папка не создана).
+
+## Round 10 (начато) — анимации v_knife: НЕ v49-формат
+Проверяем конкретную модель `v_knife.mdl` (viewmodel-нож, GMod MW, извлечённый архив: mdl+vvd+vtx).
+- Геометрия (`.vvd`/`.vtx`) читается ОК: 3201 verts / 4486 tris, bbox X-Ray Z-up корректен.
+- Скелет: 198 костей, но `multiple root bones` (viewmodel руки+нож — независимые под-деревья) → адаптеру нужно разрешить несколько корней.
+- АНИМАЦИИ: формат отличается от v49.
+  - Найдено: `sizeof(mstudioanimdesc_t)` (animdesc stride) = **100** (не 92, как v49).
+  - При stride=100 `numframes`@+16 и `animindex`@+56 корректны у 75/75 анимаций.
+  - НЕ расшифровано: `fps` (не float/int 20..60 ни на одном смещении; вероятно, другое представление),
+    и индекс имени секвенции (`szlabelindex` — похоже, относительный дельта-индекс в строковую группу,
+    а не абсолютный offset).
+- Файл собран не-каноническим тулом (видно `viper/mw/weapons/v_knife`, `ar_knife.smd`, строка-группа
+  `@idle/@holster/@draw/@knife_*`) → это распакованный/нестандартный формат, НЕ канонический StudioMDL v49.
+
+## Round 10 (продолжение) — расшифрована часть структуры animdesc нестандартных моделей
+Проверены ДВЕ GMod-модели (v_knife и v_akilo47) — обе имеют НЕ v49-формат, а единый нестандартный
+layout с `sizeof(mstudioanimdesc_t) = stride = 100` (не 92).
+- v_akilo47: numbones=215, numlocalanim=164, animidx=48976, геометрия .vvd/.vtx читается (14359 verts/15913 tris, 6 мешей).
+- Расшифрован layout animdesc (stride=100):
+  - +0  : signed self index (== -anim_offset)
+  - +8  : fps = 30.0  (float, совпадает у всех)
+  - +16 : numframes (здесь у большинства ==1; реальное число кадров хранится не здесь)
+  - +56 : animindex (каскад растёт ~3468/анимация — поправка: это канал/смещение анимации)
+- НЕ расшифровано до конца: реальное число кадров и точное значение/назначение +56/+64 (два растущих
+  каскада), а также привязка имени секвенции (szlabelindex, строковая группа «@idle» и др.).
+- ВЫВОД: формат этих GMod-моделей — не канонический StudioMDL v49. Требует полной спецификации
+  (или дальнейшего реверса полей), чтобы корректно читать анимации. Нож (v_knife) и v_akilo47
+  страдают этим же.
+
+## Round 10 (завершение) — раскладка stride=100 + рабочее декодирование каналов
+Разобрано и РЕАЛИЗОВАНО. Ключевое открытие: анимационные блоки у обеих GMod-моделей — это
+КАНАЛЬНЫЙ (не канонический StudioMDL v49) `mstudioanim`-формат, и "нестандартность" сводится
+ИСКЛЮЧИТЕЛЬНО к страйду mstudioanimdesc_t (=100 вместо 92). После применения верного страйда
+всё читается как обычная v49.
+
+### 1. Анимационные блоки = стандартный mstudioanim (подтверждено)
+`animindex@+56` у нестандартной раскладки — смещение ОТ БАЗЫ animdesc (adb + animindex), т.е.
+дать стандартную семантику v49. По этому адресу лежит ЦЕПОЧКА каналов `{ byte bone; byte flags;
+short nextoffset; data[] }` (header=4 байта; nextoffset — абсолютное смещение от текущей записи
+к следующей; 0 = конец цепочки). Это полностью соответствует v49-му `mstudioanim_t`.
+
+### 2. Смещения полей animdesc СОВПАДАЮТ с v49
+Единственное отличие — страйд (92 vs 100). Поля те же:
+  - +8  = fps (float; 30.0 у всех)
+  - +16 = numframes (реальное число кадров; 1 для статических поз, до 771 для 'freefall' и т.п.)
+  - +56 = animindex  (к цепочке mstudioanim, относительно базы animdesc)
+  - +64 = blend-партнёр (0 = одиночная; парные анимации указывают друг на друга)
+При stride=92 numframes прочитывается правдоподобно лишь у ~18/164 анимаций (мусор), при 100 — у
+164/164 (детект по множеству кадров работает надёжно).
+
+### 3. Каналы: RAW + ANIM (RLE) раскрыты полностью
+Флаги в данных: 0x01 RAWPOS, 0x02 RAWROT(Quaternion48), 0x04 ANIMPOS, 0x08 ANIMROT, 0x10 DELTA,
+0x20 RAWROT2(Quaternion64). Сжатые каналы (ANIMROT/ANIMPOS) используют `mstudioanim_valueptr_t`
+(три short offset[i], относительные к началу valueptr) → три RLE-потока осей X/Y/Z.
+
+Формат RLE (`mstudioanimvalue_t`, union из `{byte valid; byte total;}` и `short value`):
+последовательность пар (valid,total): читаем valid значений int16 подряд, затем `total-valid`
+кадров повторяют последнее. Распаковка даёт ЦЕЛЫЕ 16-битные компоненты поворота/позиции (масштаб
+1/32768); для поворота w вычисляется из нормы=1. Проверено на живом канале bone9 (flags 0x0c)
+модели v_akilo47: на 771 кадре получаются единичные кватернионы (|w²|=0.72..1.0, корректно).
+
+### 4. Итоги чтения на реальных моделях (offline-валидатор `test_real`)
+- gfl2_asteria_arms (стандартная v49, stride=92): `ok (1 seq)` 'idle' numframes=2 fps=30 — НЕ СЛОМАНО.
+- v_knife: `ok (40 seqs)` — idle 2f, holster 16f, draw 18f, knife_miss_03/04 26f, knife_fatal_03/04 51f,
+  inspect 154f (76 кост.), jog/walk/freefall/jump 21..112f; имена и число кадров корректны.
+- v_akilo47: `ok (67 seqs)` — idle/holster/draw/reload*/fire/melee_*/ads_*/walk_loop 24f,
+  freefall_loop 73f, jump 113f и т.д.
+- Явная `V49AnimLayout100()` даёт тот же результат, что авто-детект страйда внутри `V49AnimLayout()`
+  (в обоих случаях максимум раскодированных кадров: у ножа 154, у АК 113).
+
+### 5. Реализация
+- `source_mdl_anim.h`: в `ANIM_LAYOUT` добавлены поля базы-анимации `adb_*` (stride + смещения
+  fps/flags/numframes/animindex/blend); добавлена `V49AnimLayout100()` (stride=100).
+- `source_mdl_anim.cpp`:
+  - Автодетект страйда animdesc (`DetectAnimDescStride`): пробует {страйд раскладки, 92, 100} и берёт
+    тот, у которого правдоподобное numframes у наибольшего числа анимаций → читатель устойчив и к
+    v49, и к нестандартным GMod-моделям БЕЗ ручного выбора.
+  - Полная распаковка каналов: RAW (Quaternion48/64, Vector48) + ANIM (RLE по 3 осям через valueptr),
+    флаг DELTA запоминается в треке. Защита от bad_alloc / выхода за буфер сохранена.
+- Unit-тесты `test_rle_unit` и `test_anim_decode_unit` проходят; регрессии нет.
+
+ПРИМЕЧАНИЕ (остаётся): скелет у обеих GMod-моделей multi-root (руки+оружие — независимые под-деревья),
+так что `TryImportSourceSkeleton` требует поддержки нескольких корней/выбора назначенного корня — это
+отдельный шаг (не анимации), отложен.

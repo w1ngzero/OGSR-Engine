@@ -35,6 +35,7 @@ struct ANIM_FRAME
 struct ANIM_TRACK
 {
     int bone; // индекс кости (в том же порядке, что у скелета)
+    bool delta; // STUDIO_ANIM_DELTA: каналы заданы приращением к базовой позе кости
     std::vector<ANIM_FRAME> frames;
 };
 
@@ -89,6 +90,16 @@ struct ANIM_LAYOUT
     int anim_type_off;       // 3 (классика; v49 не используется)
     int anim_next_off;       // 4 (классика) / 2 (v49, short)
     int anim_stride;         // 16 (классика) / 4 (v49)
+    // mstudioanimdesc_t (база анимации). В v49 (и в нестандартной "100-байтной" раскладке
+    // GMod-моделей) numframes/fps/animindex живут именно здесь (индекс = индекс последовательности),
+    // а НЕ в mstudioseqdesc_t. Отличие стандартной v49 от этих моделей — только в СТРАЙДЕ
+    // (смещения полей совпадают: fps@8, numframes@16, animindex@56, blend@64).
+    int adb_stride;          // 92 (v49) / 100 (нестандартная GMod-раскладка)
+    int adb_fps_off;         // 8
+    int adb_flags_off;       // 12
+    int adb_numframes_off;   // 16
+    int adb_animindex_off;   // 56
+    int adb_blend_off;       // 64
     // флаги StudioAnimType
     int animflag_loop;       // бит "цикл" в флагах последовательности
 };
@@ -111,6 +122,12 @@ inline ANIM_LAYOUT ClassicAnimLayout()
     l.anim_type_off = 3;
     l.anim_next_off = 4;
     l.anim_stride = 16;
+    l.adb_stride = 0;        // классика: mstudioanimdesc_t не используется отдельно
+    l.adb_fps_off = 8;
+    l.adb_flags_off = 12;
+    l.adb_numframes_off = 16;
+    l.adb_animindex_off = 56;
+    l.adb_blend_off = 64;
     l.animflag_loop = 0x8000; // esm-флаг цикла в mstudioseqdesc_t::flags (часто: 1<<15)
     return l;
 }
@@ -137,7 +154,25 @@ inline ANIM_LAYOUT V49AnimLayout()
     l.anim_type_off = -1;          // нет отдельного поля
     l.anim_next_off = 2;           // short nextoffset
     l.anim_stride = 4;
+    l.adb_stride = 92;             // sizeof(mstudioanimdesc_t) для v49 (без неиспользуемого хвоста)
+    l.adb_fps_off = 8;
+    l.adb_flags_off = 12;
+    l.adb_numframes_off = 16;
+    l.adb_animindex_off = 56;
+    l.adb_blend_off = 64;
     l.animflag_loop = 0x0001;      // STUDIO_LOOP в mstudioseqdesc_t::flags (v49)
+    return l;
+}
+
+// НЕСТАНДАРТНАЯ раскладка mstudioanimdesc_t у GMod-моделей (v49, но animdesc stride=100).
+// Верифицированa на двух реальных viewmodel (v_knife и v_akilo47, addon MW2019): смещения
+// полей совпадают с v49 (fps@8, numframes@16, animindex@56, blend@64), отличается ТОЛЬКО страйд.
+// При stride=92 numframes прочитывается правдоподобно лишь для ~18/164 анимаций (мусор),
+// при stride=100 — для 164/164. Найдено эмпирически (см. VERIFICATION.md, Раунд 10).
+inline ANIM_LAYOUT V49AnimLayout100()
+{
+    ANIM_LAYOUT l = V49AnimLayout();
+    l.adb_stride = 100;            // sizeof(mstudioanimdesc_t) у этих GMod-моделей = 100
     return l;
 }
 
