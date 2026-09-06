@@ -202,6 +202,16 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
     const u32 nBones = static_cast<u32>(bones->size());
     const u32 nSeq = static_cast<u32>(seqs.size()); // может быть 0 -> валидный пустой набор (0 движений)
 
+    // Диагностика объемов: при несовпавших размерах треков сериализация могла бы запросить
+    // гигантский буфер -> OOM. Печатаем реальные числа, чтобы сразу увидеть причину.
+    {
+        std::uint64_t totalFrames = 0;
+        for (const auto& sq : seqs)
+            totalFrames += static_cast<std::uint64_t>(sq.numframes > 0 ? sq.numframes : 0);
+        Msg("[SourceMotions] building OMF: nSeq=%u nBones=%u totalFrames=%llu", nSeq, nBones,
+            static_cast<unsigned long long>(totalFrames));
+    }
+
     // === OGF_S_SMPARAMS ===
     std::vector<std::uint8_t> SP;
     W16(SP, static_cast<std::uint16_t>(xrOGF_SMParamsVersion)); // 4
@@ -248,7 +258,13 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
         std::vector<std::uint8_t> body;
         WStr(body, seqs[s].name.c_str());
         // Единое число кадров на последовательность (source numframes; все каналы приведены к нему).
-        const std::uint32_t dwLen = seqs[s].numframes > 0 ? static_cast<std::uint32_t>(seqs[s].numframes) : 1u;
+        // Жёсткий потолок 4096: защита от мусорного numframes (иначе гигантский буфер -> OOM).
+        std::uint32_t dwLen = seqs[s].numframes > 0 ? static_cast<std::uint32_t>(seqs[s].numframes) : 1u;
+        if (dwLen > 4096)
+        {
+            Msg("!! [SourceMotions] seq '%s' numframes=%u > 4096; clamping", seqs[s].name.c_str(), dwLen);
+            dwLen = 4096;
+        }
         W32(body, dwLen);
         for (u32 b = 0; b < nBones; ++b)
         {
@@ -257,6 +273,27 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
             if (!tr || tr->frames.empty())
             {
                 hold = MakeHoldTrack(static_cast<int>(b), static_cast<int>(dwLen));
+                tr = &hold;
+            }
+            // ВАЖНО: пишем ровно dwLen ключей (см. циклы ниже). Если реальное число
+            // декодированных кадров трека != dwLen, то M._keysR[M._keysT16/_keysT8] содержит
+            // только frames.size() элементов, а чтение M._keysR[f] при f >= size() — это
+            // ВЫХОД ЗА ГРАНИЦЫ (ref_smem::operator[] без проверки) -> порча кучи -> краш
+            // в последующем push_back (mimalloc). Поэтому приводим число кадров к dwLen:
+            // слишком короткий трек дополняем последним кадром, слишком длинный — обрезаем.
+            if (tr->frames.size() != dwLen)
+            {
+                ANIM_TRACK fixed = *tr;
+                if (fixed.frames.size() < dwLen)
+                {
+                    const ANIM_FRAME last = fixed.frames.back();
+                    fixed.frames.resize(dwLen, last);
+                }
+                else
+                {
+                    fixed.frames.resize(dwLen);
+                }
+                hold = fixed;
                 tr = &hold;
             }
             CMotion M;

@@ -117,6 +117,14 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
     if (numlocalseq <= 0 || localseqindex < 0)
         return EAnimResult::NoSequences;
 
+    // Защита от мусорного/несовпадающего числа последовательностей: если numlocalseq
+    // неправдоподобно велико (несовпавшая раскладка seqdesc), не резервируем миллионы
+    // записей и не улетаем в bad_alloc/OOM — выходим с ошибкой (вызывающий код залогирует).
+    // ВАЖНО: Msg() здесь использовать нельзя — этот файл тестируется автономно через g++
+    // (test_source_mdl/test_anim_real), где журнала движка нет.
+    if (numlocalseq > 1024)
+        return EAnimResult::MalformedBuffer;
+
     // База-анимация (mstudioanimdesc_t): stride авто-определяется (92 для v49, 100 для GMod).
     std::int32_t numlocalanim = 0, localanimindex = 0;
     if (!ReadAt(base, size, static_cast<std::size_t>(L.numlocalanim_off), numlocalanim) ||
