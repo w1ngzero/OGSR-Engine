@@ -84,6 +84,7 @@ struct ANIM_LAYOUT
     int seq_numframes_off;    // классика: прямо в seqdesc; v49: НЕ здесь (см. animdesc)
     int seq_fps_off;          // классика: прямо в seqdesc; v49: НЕ здесь (см. animdesc)
     int seq_groupsize_off;    // 64 (классика) / 68 (v49)
+    int seq_flags_off;        // смещение int flags в mstudioseqdesc_t (+12 у v49); -1 = не читать
     int seq_stride;           // sizeof(mstudioseqdesc_t)
     // mstudioanim_t (по-костный). В v49 — byte bone, byte flags, short nextoffset
     // (без отдельного поля type; тип кодируется в flags), stride = 4.
@@ -118,6 +119,7 @@ inline ANIM_LAYOUT ClassicAnimLayout()
     l.seq_numframes_off = 152; // классический HL2: numframes поздно в структуре
     l.seq_fps_off = 156;
     l.seq_groupsize_off = 64;
+    l.seq_flags_off = -1;       // классика: не читаем (loop=false, т.е. всё stop_at_end)
     l.seq_stride = 160;
     l.anim_bone_off = 0;
     l.anim_flags_off = 2;
@@ -149,6 +151,7 @@ inline ANIM_LAYOUT V49AnimLayout()
     l.seq_animindex_off = 60;      // animindexindex
     l.seq_numframes_off = -1;      // НЕ используется для v49 (сигнал "из animdesc")
     l.seq_fps_off = -1;
+    l.seq_flags_off = 12;       // у v49 flags в mstudioseqdesc_t на +12 (STUDIO_LOOPING=0x100)
     l.seq_groupsize_off = 68;
     l.seq_stride = 212;            // sizeof(mstudioseqdesc_t) для v49
     l.anim_bone_off = 0;           // byte bone

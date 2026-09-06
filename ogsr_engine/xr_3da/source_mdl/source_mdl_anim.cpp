@@ -185,6 +185,20 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
         if (seq.numframes <= 0 || seq.numframes > 4096)
             continue; // пропускаем пустые/несовпадающие последовательности (без краша)
 
+        // Цикличность: читаем int flags из mstudioseqdesc_t и смотрим STUDIO_LOOPING (0x100).
+        // ВАЖНО: раньше seq.loop НИГДЕ не присваивался и был неинициализирован (UB) — из-за этого
+        // моушены вроде knife_fatal_03/holster случайно считались ЦИКЛАМИ, тогда как были одноразовыми.
+        // Одноразовые (не loop) должны быть esmStopAtEnd, иначе weapon-state machine застревает
+        // (motion_length()==0 -> OnAnimationEnd никогда не срабатывает).
+        seq.loop = false;
+        if (L.seq_flags_off >= 0)
+        {
+            std::int32_t seq_flags = 0;
+            if (ReadAt(base, size, seq_off + static_cast<std::size_t>(L.seq_flags_off), seq_flags))
+                seq.loop = ((static_cast<std::uint32_t>(seq_flags) & 0x0100u) != 0) || // STUDIO_LOOPING
+                            ((static_cast<std::uint32_t>(seq_flags) & 0x0001u) != 0); // STUDIO_LOOP
+        }
+
         // Для v49 каналы идут от базы-анимации: animindex (из animdesc) = смещение от НАЧАЛА
         // animdesc к mstudioanim_t. Для классики — массив short-смещений (первое = к первому каналу).
         std::size_t anim_abs = 0;
