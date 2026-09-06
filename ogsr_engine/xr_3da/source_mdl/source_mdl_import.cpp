@@ -295,6 +295,67 @@ bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureNa
     return true;
 }
 
+bool TryAutoBuildSkeletonOGF(const char* N, std::vector<std::uint8_t>& outBytes)
+{
+    outBytes.clear();
+    if (!psSourceSkeletonMode)
+        return false;
+
+    // Материал для Source-меша: те же значения, что в LoadSourceMeshGeometry.
+    static const char* const sSourceMeshTexture = "models\\hands\\c_hands";
+    static const char* const sSourceMeshShader = "default";
+
+    // 1) Геометрия (нужна и для bb/bs, и как child-визуал).
+    SourceMdl::SourceMeshImport imp;
+    if (!TryImportSourceMesh(N, imp) || !imp.loaded || imp.verts.empty())
+    {
+        Msg("!! [SourceModel] auto-build: no skinned mesh in companion .mdl for '%s'", N);
+        return false;
+    }
+
+    // 2) Mesh-OGF (CSkeletonX_ST child) — готовый поток с header/verts/indices.
+    std::vector<std::uint8_t> meshOg;
+    if (!BuildSourceMeshOGFStream(imp, sSourceMeshTexture, sSourceMeshShader, meshOg) || meshOg.empty())
+    {
+        Msg("!! [SourceModel] auto-build: could not serialize mesh OGF for '%s'", N);
+        return false;
+    }
+
+    // 3) Top-level skeleton-anim header (bb/bs из вершин меша).
+    ogf_header hdr{};
+    hdr.format_version = xrOGF_FormatVersion;
+    hdr.type = MT_SKELETON_ANIM;
+    hdr.shader_id = 0;
+    {
+        Fvector mn, mx;
+        mn.set(1e30f, 1e30f, 1e30f);
+        mx.set(-1e30f, -1e30f, -1e30f);
+        for (const auto& v : imp.verts)
+        {
+            mn.x = _min(mn.x, v.P.x); mn.y = _min(mn.y, v.P.y); mn.z = _min(mn.z, v.P.z);
+            mx.x = _max(mx.x, v.P.x); mx.y = _max(mx.y, v.P.y); mx.z = _max(mx.z, v.P.z);
+        }
+        hdr.bb.min = mn;
+        hdr.bb.max = mx;
+        hdr.bs.c = imp.sphere.P;
+        hdr.bs.r = imp.sphere.R;
+    }
+    std::vector<std::uint8_t> hdrPayload(reinterpret_cast<const std::uint8_t*>(&hdr),
+                                         reinterpret_cast<const std::uint8_t*>(&hdr) + sizeof(hdr));
+
+    // 4) OGF_CHILDREN: sub-chunk 0 = the mesh OGF (single child).
+    //    FHierrarhyVisual::Load требует непустой OGF_CHILDREN, иначе FATAL("Invalid visual").
+    std::vector<std::uint8_t> childrenPayload;
+    PutChunk(childrenPayload, 0, meshOg);
+
+    std::vector<std::uint8_t> out;
+    PutChunk(out, OGF_HEADER, hdrPayload);
+    PutChunk(out, OGF_CHILDREN, childrenPayload);
+
+    outBytes.swap(out);
+    return true;
+}
+
 bool TryImportSourceAnimations(const char* modelName, const vecBones* bones,
                                std::vector<std::uint8_t>& outOmfBytes)
 {

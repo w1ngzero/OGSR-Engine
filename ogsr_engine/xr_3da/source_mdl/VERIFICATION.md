@@ -681,3 +681,23 @@ Zip: `xray_source_patch/github_upload_ogsr_engine.zip` = 161 879 б (Sep 6 06:29
   `CKinematicsAnimated` (не заглушка);
 - скелет стоит в правильной позе (bind pose / первая frame) без «разброса» костей;
 - анимации проигрываются по имени из плейлиста (idle/draw/holster/инспект и т.д.).
+
+## Round 17 — автобилд всего визуала из Source .mdl (без .ogf/.omf)
+
+Осмысленный итог сессии с `.ogf`-заглушками: движку нужен не просто заголовок, а полный
+скелетный OGF с чанком `OGF_CHILDREN` (иначе `FHierrarhyVisual::Load` → FATAL "Invalid visual"),
+а его содержимое — валидный child-визуал. Поэтому вместо хрупкой ручной заглушки сделан
+настоящий автобилд:
+
+- `SourceMdl::TryAutoBuildSkeletonOGF(modelName, bytes)` — строит в памяти целиком скелетный
+  OGF из сопутствующего `.mdl`: `OGF_HEADER` (type=MT_SKELETON_ANIM) + `OGF_CHILDREN`
+  (sub-chunk 0 = меш-OGF, который даёт `BuildSourceMeshOGFStream`, CSkeletonX_ST). Чанка
+  `OGF_S_BONE_NAMES` нет → `CKinematics::Load` идёт в Source-ветку (кости+анимации из `.mdl`).
+- `CModelPool::Instance_Load` — если `.ogf` отсутствует, но `rs_source_skeleton` включён и есть
+  `<model>.mdl` (+ `.vvd`/`.vtx`), строит визуал из него и грузит. В логе: `[SourceModel]
+  auto-built '<model>' from companion .mdl`. `.omf` не нужен (анимации из `.mdl`).
+
+Файлы меша (`.vvd`/`.vtx`) нужны для геометрии. Для костей/анимаций достаточно `.mdl`.
+
+Описано в TEST_ONSCREEN.md (см. §5 «wpn_hud») — модель теперь можно класть в виде
+`<name>.mdl` (+ `.vvd`/`.vtx`), движок сам соберёт визуал.

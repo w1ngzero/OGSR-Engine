@@ -67,4 +67,15 @@ bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureNa
 //! there is no companion .mdl, no sequences, or the bytes are empty. Requires psSourceSkeletonMode.
 bool TryImportSourceAnimations(const char* modelName, const vecBones* bones,
                                std::vector<std::uint8_t>& outOmfBytes);
+
+// ---- Round-16: auto-build a whole skeleton OGF from a Source .mdl ----
+//! Used by CModelPool::Instance_Load so that a model can be created from ONLY a companion
+//! "<name>.mdl" (no hand-made .ogf). Builds a top-level skeleton-anim OGF stream in memory:
+//!   OGF_HEADER (type=MT_SKELETON_ANIM) + OGF_CHILDREN(sub-chunk 0 = the Source skinned mesh OGF
+//!   built by BuildSourceMeshOGFStream). No OGF_S_BONE_NAMES chunk is written, so CKinematics::Load
+//!   falls into the Source-skeleton branch and fills bones/animations from the same .mdl. The
+//!   embedded child is a valid CSkeletonX_ST geometry so FHierrarhyVisual::Load (which requires a
+//!   non-empty OGF_CHILDREN) succeeds; LoadSourceMeshGeometry may then replace it.
+//! Returns true and fills outBytes on success; false if the .mdl/mesh skeleton import failed.
+bool TryAutoBuildSkeletonOGF(const char* modelName, std::vector<std::uint8_t>& outBytes);
 } // namespace SourceMdl

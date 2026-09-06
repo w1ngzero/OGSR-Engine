@@ -3,6 +3,8 @@
 #include "ModelPool.h"
 #include "../../xr_3da/IGame_Persistent.h"
 #include "../../xr_3da/fmesh.h"
+#include "../../xr_3da/source_mdl/source_mdl_import.h" // TryAutoBuildSkeletonOGF (Source .mdl auto-build)
+#include "../../xrCore/fs_internal.h"                  // CTempReader
 #include "fhierrarhyvisual.h"
 #include "SkeletonAnimated.h"
 #include "fvisual.h"
@@ -109,6 +111,31 @@ dxRender_Visual* CModelPool::Instance_Load(LPCSTR N, BOOL allow_register)
     {
         if (!FS.exist(fn, fsgame::game_meshes, name))
         {
+            // NEW (Source .MDL): there is no .ogf at all. If rs_source_skeleton is on and a
+            // companion "<N>.mdl" exists, build a whole skeleton OGF in memory from the .mdl
+            // (header + OGF_CHILDREN with the skinned mesh), so the model loads with bones, mesh
+            // and animations from the Source files only. No hand-made .ogf / .omf is required.
+            std::vector<std::uint8_t> srcOg;
+            if (SourceMdl::TryAutoBuildSkeletonOGF(N, srcOg) && !srcOg.empty())
+            {
+                IReader* R = xr_new<CTempReader>(srcOg.data(), srcOg.size(), 0);
+
+                dxRender_Visual* V;
+                ogf_header H;
+                R->r_chunk_safe(OGF_HEADER, &H, sizeof(H));
+                V = Instance_Create(H.type);
+                V->Load(N, R, 0);
+                xr_delete(R);
+
+                g_pGamePersistent->RegisterModel(V);
+                if (allow_register)
+                    Instance_Register(N, V);
+
+                Msg("[SourceModel] auto-built '%s' from companion .mdl (%u B OGF stream)", N,
+                    static_cast<unsigned>(srcOg.size()));
+                return V;
+            }
+
             FATAL("Can't find model file [%s]", name);
         }
     }
