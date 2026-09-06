@@ -17,8 +17,12 @@
 
 namespace SourceMdl
 {
-ENGINE_API int psSourceSkeletonMode = 0;
-ENGINE_API int psSourceMeshMode = 0;
+// ON by default: the whole point of this project is porting Source .MDL-only assets (no .ogf),
+// so as soon as a model has no .ogf but a companion .mdl, we auto-build it. Stock OGSR models
+// ship an .ogf and are untouched. Can still be turned off with `rs_source_skeleton=0` /
+// `rs_source_mesh=0` if a specific asset should NOT be auto-built.
+ENGINE_API int psSourceSkeletonMode = 1;
+ENGINE_API int psSourceMeshMode = 1;
 
 namespace
 {
@@ -378,7 +382,11 @@ bool TryAutoBuildSkeletonOGF(const char* N, std::vector<std::uint8_t>& outBytes)
 {
     outBytes.clear();
     if (!psSourceSkeletonMode)
+    {
+        Msg("!! [SourceModel] auto-build skipped for '%s': rs_source_skeleton is 0 (set rs_source_skeleton=1 "
+            "to build Source .mdl models that have no .ogf)", N);
         return false;
+    }
 
     // Материал для Source-меша: те же значения, что в LoadSourceMeshGeometry.
     static const char* const sSourceMeshTexture = "models\\hands\\c_hands";

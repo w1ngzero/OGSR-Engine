@@ -302,6 +302,21 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
             const bool rAbsent = M.test_flag(flRKeyAbsent);
             const bool tPresent = M.test_flag(flTKeyPresent);
             const bool t16 = M.test_flag(flTKey16IsBit);
+            // Safety valve (should never fire): ref_smem::operator[] has no bounds check, so if a
+            // motion was ever built with FEWER keys than dwLen, the loops below would silently write
+            // out of bounds and trash the heap (surfacing later as a crash far from here). If that
+            // ever happens we log the real sizes and abort the build cleanly instead of corrupting.
+            {
+                const u32 rLen = M._keysR.size();
+                const u32 tLen = t16 ? M._keysT16.size() : M._keysT8.size();
+                if ((!rAbsent && rLen < dwLen) || (tPresent && tLen < dwLen))
+                {
+                    Msg("!! [SourceMotions] INTERNAL size mismatch: seq '%s' bone %d dwLen=%u "
+                        "ratures=%u tkeys=%u (rAbsent=%d tPresent=%d t16=%d); aborting OMF build",
+                        seqs[s].name.c_str(), b, dwLen, rLen, tLen, (int)rAbsent, (int)tPresent, (int)t16);
+                    return false;
+                }
+            }
             std::uint8_t flags = 0;
             if (rAbsent) flags |= flRKeyAbsent;
             if (tPresent) flags |= flTKeyPresent;
