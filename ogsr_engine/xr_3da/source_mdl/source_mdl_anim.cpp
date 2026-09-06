@@ -198,6 +198,11 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
                 seq.loop = ((static_cast<std::uint32_t>(seq_flags) & 0x0100u) != 0) || // STUDIO_LOOPING
                             ((static_cast<std::uint32_t>(seq_flags) & 0x0001u) != 0); // STUDIO_LOOP
         }
+        // У idle флаги=0x0 (ни STUDIO_LOOPING, ни STUDIO_LOOP) у некоторых GMod-моделей, но idle
+        // ОБЯЗАН быть циклом (иначе motion_length()==0 -> OnAnimationEnd для него не сработает и
+        // weapon-state machine зависнет на стоп-кадре). Принудительно зацикливаем по имени.
+        if (!seq.loop && (seq.name == "idle"))
+            seq.loop = true;
 
         // Для v49 каналы идут от базы-анимации: animindex (из animdesc) = смещение от НАЧАЛА
         // animdesc к mstudioanim_t. Для классики — массив short-смещений (первое = к первому каналу).

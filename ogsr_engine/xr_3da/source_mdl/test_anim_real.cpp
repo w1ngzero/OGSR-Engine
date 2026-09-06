@@ -1,27 +1,25 @@
 //--------------------------------------------------------------------------------------------------
-// test_anim_real.cpp — проверка декодирования RAWROT2 (Quaternion64) в реальные кадры.
+// test_anim_real.cpp — проверка декодирования каналов реального .mdl в кадры (V49AnimLayout100).
 //
-// Извлекает байтовый канал RAWROT2 напрямую из .mdl и декодирует его в кватернион,
-// проверяя что |q| == 1 (единичный). Также показывает, что кадры последовательности,
-// заполненные читателем (source_mdl_anim.cpp), совпадают с этим кватернионом.
+// Задачи:
+//   1) Прочитать анимации ЧЕРЕЗ читатель (source_mdl_anim.cpp) ровно так, как это делает
+//      движковый путь TryImportSourceAnimations (та же раскладка V49AnimLayout100).
+//   2) Для последовательностей holster/draw/knife_fatal_03 убедиться, что кадры РЕАЛЬНО
+//      меняются (не постоянная/identity-поза), т.е. моушен присутствует.
+//   3) Убедиться, что декодированные кватернионы единичные (|q|=1) — признак корректного
+//      RAWROT/RAWROT2 декодера.
+//
+// Это отдельная проверка "данные анимации есть и меняются". Если она зелёная, а нож в игре
+// всё равно статичен — причина НЕ в декодировании каналов, а в привязке меш<->скелет или в
+// проигрывании OMF (см. VERIFICATION.md).
 //--------------------------------------------------------------------------------------------------
 #include "source_mdl_anim.h"
-#include "source_mdl_anim_decode.h"
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <cmath>
 #include <vector>
 #include <string>
-
-enum { kLastAnimCount = 1, kNewAnimCount = 3 };
-
-bool ReadAt(const unsigned char* b, size_t size, size_t off, void* out, size_t n)
-{
-    if (off + n > size) return false;
-    std::memcpy(out, b + off, n);
-    return true;
-}
+#include <fstream>
 
 int main(int argc, char** argv)
 {
@@ -30,70 +28,66 @@ int main(int argc, char** argv)
         std::printf("usage: %s <model.mdl>\n", argv[0]);
         return 2;
     }
-    FILE* f = std::fopen(argv[1], "rb");
-    if (!f) return 2;
-    std::fseek(f, 0, SEEK_END); long sz = std::ftell(f); std::fseek(f, 0, SEEK_SET);
-    std::vector<unsigned char> b((size_t)sz);
-    if (std::fread(b.data(), 1, (size_t)sz, f) != (size_t)sz) return 2;
-    std::fclose(f);
-    const size_t N = b.size();
-
+    std::ifstream f(argv[1], std::ios::binary);
+    if (!f) { std::printf("cannot open %s\n", argv[1]); return 2; }
+    std::vector<unsigned char> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::size_t N = b.size();
     std::printf("mdl size = %zu\n", N);
 
-    // Прочитаем через читатель анимаций (v49) уже заполненные кадры.
+    // Та же раскладка, что и в TryImportSourceAnimations(): V49AnimLayout100.
     std::vector<SourceMdl::ANIM_SEQ> seqs;
-    SourceMdl::EAnimResult r = SourceMdl::ReadSourceAnims(b.data(), N, seqs, SourceMdl::V49AnimLayout(), 49);
+    SourceMdl::EAnimResult r = SourceMdl::ReadSourceAnims(b.data(), N, seqs, SourceMdl::V49AnimLayout100(), 256);
     std::printf("reader: %s (seqs=%d)\n", SourceMdl::AnimResultName(r), (int)seqs.size());
     if (r != SourceMdl::EAnimResult::Ok)
         return 2;
 
-    // Каналы RAWROT2 на 14224 (v49, animindex=108 от базы 14116).
-    const std::size_t animCh = 14224;
-    std::printf("anim channel at %zu: bone=%d flags=0x%02x\n", animCh, b[animCh], b[animCh + 1]);
-    const std::uint8_t* raw = &b[animCh + 4]; // после mstudioanim_t {bone,flags,nextoffset}
+    int pass = 0, fail = 0;
+    const char* const focus[] = {"holster", "draw", "knife_fatal_03", "knife_fatal_04", "idle"};
+    for (const char* name : focus)
+    {
+        const SourceMdl::ANIM_SEQ* s = nullptr;
+        for (const auto& sq : seqs)
+            if (sq.name == name) { s = &sq; break; }
+        if (!s) { std::printf("%-16s : NOT FOUND\n", name); ++fail; continue; }
 
-    SourceMdl::AnimQ::Quat4 q;
-    if (!SourceMdl::DecodeQuaternion64(raw, q))
-    {
-        std::printf("decoder FAIL\n");
-        return 2;
-    }
-    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    std::printf("decoded q=(%.5f,%.5f,%.5f,%.5f) |q|=%.5f\n", q.x, q.y, q.z, q.w, n);
-    if (std::fabs(n - 1.0f) > 0.005f)
-    {
-        std::printf("FAIL: |q| != 1\n");
-        return 2;
-    }
-    const bool nonIdentity = std::fabs(q.x) > 1e-4f || std::fabs(q.y) > 1e-4f || std::fabs(q.z) > 1e-4f ||
-                             std::fabs(q.w - 1.0f) > 1e-4f;
-    std::printf("non-identity rotation: %s\n", nonIdentity ? "yes" : "no (identity)");
-
-    // Сверка с кадрами читателя (bone0, оба кадра == q).
-    if (seqs.empty() || seqs[0].tracks.empty())
-    {
-        std::printf("FAIL: no tracks\n");
-        return 2;
-    }
-    const auto& tr = seqs[0].tracks[0];
-    if (tr.bone != 0)
-    {
-        std::printf("FAIL: track bone=%d (expected 0)\n", tr.bone);
-        return 2;
-    }
-    std::printf("reader frames for bone0 = %d (seq.numframes=%d)\n", (int)tr.frames.size(), seqs[0].numframes);
-    for (std::size_t i = 0; i < tr.frames.size(); ++i)
-    {
-        const auto& fq = tr.frames[i].rot;
-        const float d = std::fabs(fq.x - q.x) + std::fabs(fq.y - q.y) + std::fabs(fq.z - q.z) + std::fabs(fq.w - q.w);
-        std::printf("  frame %zu: q=(%.5f,%.5f,%.5f,%.5f) diff=%.6f\n", i, fq.x, fq.y, fq.z, fq.w, d);
-        if (d > 0.01f)
+        int varying = 0, total = 0;
+        float maxBadNorm = 0.f, maxQ = 0.f;
+        for (const auto& t : s->tracks)
         {
-            std::printf("FAIL: frame != decoded q\n");
-            return 2;
+            ++total;
+            if (t.frames.size() >= 2)
+            {
+                float md = 0.f;
+                for (std::size_t k = 1; k < t.frames.size(); ++k)
+                {
+                    const auto& a = t.frames[0].rot, c = t.frames[k].rot;
+                    const float d = std::fabs(a.x - c.x) + std::fabs(a.y - c.y) + std::fabs(a.z - c.z) + std::fabs(a.w - c.w);
+                    if (d > md) md = d;
+                }
+                if (md > 0.001f) ++varying;
+            }
+            for (const auto& fr : t.frames)
+            {
+                const float n2 = fr.rot.x * fr.rot.x + fr.rot.y * fr.rot.y + fr.rot.z * fr.rot.z + fr.rot.w * fr.rot.w;
+                if (std::fabs(n2 - 1.f) > maxBadNorm) maxBadNorm = std::fabs(n2 - 1.f);
+                if (std::fabs(fr.rot.w) > maxQ) maxQ = std::fabs(fr.rot.w);
+            }
         }
+        const bool decays = varying > 0;
+        const bool units = maxBadNorm < 0.01f;
+        // Для idle главное — что он ЦИКЛИЧЕСКИЙ (иначе стоп-кадр); это не анимированная поза
+        // движения (реальный "живой" idle здесь — a_idle_active, кадры меняются), а короткая
+        // 2-кадровая поза. Поэтому проверяем loop, а не изменение кадров.
+        bool ok;
+        if (std::string(name) == "idle")
+            ok = s->loop && units;
+        else
+            ok = decays && units;
+        std::printf("%-16s : %s  tracks=%3d varyingRot=%3d loop=%d |q^2-1|max=%.4f  (nf=%d)\n",
+                    name, ok ? "PASS" : "FAIL", total, varying, (int)s->loop, maxBadNorm, s->numframes);
+        (ok ? pass : fail)++;
     }
 
-    std::printf("ALL ANIM DECODE CHECKS PASSED\n");
-    return 0;
+    std::printf("\n=== %d PASS / %d FAIL ===\n", pass, fail);
+    return fail == 0 ? 0 : 1;
 }
