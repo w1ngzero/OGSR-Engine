@@ -227,18 +227,20 @@ int main()
     // ===== Round 3: basis =====
     std::printf("== Round 3: basis Source->X-Ray ==\n");
     Basis3 basis = GetSourceToXRayBasis();
-    CHECK(near(Det3(basis), 1.f));                 // чистый поворот, det == +1
+    const float S = kSourceToXRayScale;
+    // поворотная часть (детерминант/масштаб) — чистый поворот без отражения:
+    CHECK(near(Det3(basis), S * S * S));           // det = S^3 (масштаб+чистый поворот), + => без flip
     CHECK(RequiresWindingOrNormalFlip(basis) == false);
     {
-        Vec3f up{0, 1, 0};                         // "вверх" Source (Y) -> xray Z
+        Vec3f up{0, 1, 0};                         // "вверх" Source (Y) -> xray +Z
         Vec3f r = Transform(basis, up);
-        CHECK(near(r.x, 0.f) && near(r.y, 0.f) && near(r.z, 1.f));
-        Vec3f fwd{0, 0, 1};                        // "вперёд" Source (Z) -> xray -Y
+        CHECK(near(r.x, 0.f) && near(r.y, 0.f) && near(r.z, S));
+        Vec3f fwd{0, 0, 1};                        // "вперёд" Source (Z) -> xray +Y (в экран)
         Vec3f r2 = Transform(basis, fwd);
-        CHECK(near(r2.x, 0.f) && near(r2.y, -1.f) && near(r2.z, 0.f));
-        Vec3f right{1, 0, 0};                      // X -> X
+        CHECK(near(r2.x, 0.f) && near(r2.y, S) && near(r2.z, 0.f));
+        Vec3f right{1, 0, 0};                      // X -> -X (поворот, det=+1)
         Vec3f r3 = Transform(basis, right);
-        CHECK(near(r3.x, 1.f) && near(r3.y, 0.f) && near(r3.z, 0.f));
+        CHECK(near(r3.x, -S) && near(r3.y, 0.f) && near(r3.z, 0.f));
     }
 
     // ===== Round 3: mesh weight normalization =====

@@ -13,7 +13,9 @@ namespace
 // отдаёт только позицию/нормаль/UV (в классическом inline-формате касательных нет).
 void BuildTangentBasis(const Fvector& N, Fvector& T, Fvector& B)
 {
-    Fvector up(0.f, 1.f, 0.f);
+    // Меш уже переведён в X-Ray кадр (Z-up) — поэтому "верх" = (0,0,1).
+    // (Раньше был (0,1,0), что давало произвольно повёрнутый tangent-кадр для нормальных-мап.)
+    Fvector up(0.f, 0.f, 1.f);
     if (std::fabs(N.dotproduct(up)) > 0.99f)
         up.set(1.f, 0.f, 0.f);
     T.crossproduct(up, N);

@@ -9,17 +9,18 @@ namespace SourceMdl
 {
 Fmatrix GetSourceToXRayBasisFmatrix()
 {
-    // Из чистого базиса:  xray.x = src.x;  xray.y = -src.z;  xray.z = src.y.
+    // Тот же базис, что GetSourceToXRayBasis() (масштаб + ориентация), но в виде X-Ray Fmatrix.
+    // Из чистого базиса:  xray.x = -S*src.x;  xray.y = +S*src.z;  xray.z = +S*src.y.
     // X-Ray Fmatrix хранит i/j/k как СТРОКИ (row-major), c — строку трансляции.
-    // set(R,N,D,C): R=i, N=j, D=k, C=c.
-    //   i = (1, 0, 0)
-    //   j = (0, 0, -1)
-    //   k = (0, 1, 0)
-    //   c = (0, 0, 0)
+    // set(R,N,D,C): R=i (выходная X), N=j (выходная Y), D=k (выходная Z), C=c.
+    //   i = (-S, 0, 0)   -> out.x = -S*in.x
+    //   j = ( 0, 0, S)   -> out.y = +S*in.z
+    //   k = ( 0, S, 0)   -> out.z = +S*in.y
+    const float S = SourceMdl::kSourceToXRayScale;
     Fmatrix m;
-    m.set(Fvector3().set(1.f, 0.f, 0.f),
-          Fvector3().set(0.f, 0.f, -1.f),
-          Fvector3().set(0.f, 1.f, 0.f),
+    m.set(Fvector3().set(-S, 0.f, 0.f),
+          Fvector3().set(0.f, 0.f, S),
+          Fvector3().set(0.f, S, 0.f),
           Fvector3().set(0.f, 0.f, 0.f));
     return m;
 }

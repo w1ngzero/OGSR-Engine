@@ -10,6 +10,11 @@
 #include "../../xr_3da/fmesh.h"
 #include "../../xrCDB/cl_intersect.h"
 
+// DIAG (static-knife): троттленный лог движения кости и отказов скиннинга.
+#include <set>
+#include <map>
+#include <cmath>
+
 //////////////////////////////////////////////////////////////////////
 // Body Part
 //////////////////////////////////////////////////////////////////////
@@ -65,6 +70,33 @@ void CSkeletonX::_Render(CBackend& cmd_list, ref_geom& hGeom, u32 vCount, u32 iO
     cmd_list.set_xform_world_old(Parent->mOldWorldMartrix);
 
     cmd_list.stat.r.s_dynamic.add(vCount);
+
+    // DIAG (static-knife): двигается ли КОСТЬ при проигрывании анимации. Троттлено: ~каждые 0.7с
+    // логируем локальный поворот кости 0 (самая первая кость меша). Если значения МЕНЯЮТСЯ
+    // кадр-в-кадр — анимация работает (кости двигаются), значит статичен МЕШ из-за скиннинга;
+    // если КОНСТАНТНЫ — анимация реально не проигрывается (проблема в моушене).
+    // Это отделяет "не работают анимации" от "не работает привязка меш<->кости".
+    {
+        static std::map<xr_string, float> s_BoneSampleT{};
+        static std::map<xr_string, float> s_LastRot[4]{};
+        const xr_string nm = Parent->dbg_name.c_str();
+        if (BonesUsed.size() > 0 && !Parent->dbg_name.empty())
+        {
+            const u16 b = BonesUsed[0];
+            const Fmatrix& M = Parent->LL_GetTransform_R(b);
+            float& t0 = s_BoneSampleT[nm];
+            if (t0 == 0.f) t0 = Device.fTimeGlobal;
+            if (Device.fTimeGlobal - t0 > 0.7f)
+            {
+                t0 = Device.fTimeGlobal;
+                float d0 = std::fabs(M.m[0][0]-s_LastRot[0][nm])+std::fabs(M.m[0][1]-s_LastRot[1][nm])+std::fabs(M.m[0][2]-s_LastRot[2][nm])+std::fabs(M.m[0][3]-s_LastRot[3][nm]);
+                s_LastRot[0][nm]=M.m[0][0]; s_LastRot[1][nm]=M.m[0][1]; s_LastRot[2][nm]=M.m[0][2]; s_LastRot[3][nm]=M.m[0][3];
+                Msg("~~DIAG bonemove: [%s] bone=%u row0=(%g,%g,%g,%g) deltaFromPrev=%.5f",
+                    nm.c_str(), b,
+                    M.m[0][0],M.m[0][1],M.m[0][2],M.m[0][3], d0);
+            }
+        }
+    }
     switch (RenderMode)
     {
     case RM_SKINNING_SOFT: {
@@ -99,12 +131,21 @@ void CSkeletonX::_Render(CBackend& cmd_list, ref_geom& hGeom, u32 vCount, u32 iO
 
         if (!fill_array(c_bones_array, Parent, false, RMS_bonecount) || !fill_array(c_bones_array_old, Parent, true, RMS_bonecount))
         {
-            static bool logged{}; // чтоб не спамить в лог по сто раз за кадр.
-            if (!logged)
+            static std::set<xr_string> s_LoggedModels{}; // по разу на модель, не спамить в лог.
+            const xr_string key_name = this->Parent->dbg_name.c_str();
+            if (s_LoggedModels.insert(key_name).second)
             {
-                logged = true;
                 Msg("!![%s] Can't get/create some bone array for model [%s] with [%u] bones. Most likely, an incorrect shader is assigned there.", __FUNCTION__,
                     this->Parent->dbg_name.c_str(), RMS_bonecount);
+                // DIAG (static-knife): показать ВСЁ, что сходится в этом узле, чтобы понять, почему
+                // HW-скиннинг не получает sbones_array. bonesArray=NULL => в таблице констант
+                // загруженного шейдера нет 'sbones_array'; RenderMode<0 => опция скиннинга не задана.
+                Msg("~~DIAG skinning-fail: RenderMode=%d RMS_bonecount=%u shader=[%s] texture=[%s] "
+                    "usedBones=%u parentBones=%u bonesArray=%s oldArray=%s",
+                    (int)RenderMode, RMS_bonecount,
+                    this->dbg_shader_name.c_str(), this->dbg_texture_name.c_str(),
+                    (unsigned)BonesUsed.size(), (unsigned)Parent->LL_BoneCount(),
+                    c_bones_array ? "OK" : "NULL", c_bones_array_old ? "OK" : "NULL");
             }
         }
 
