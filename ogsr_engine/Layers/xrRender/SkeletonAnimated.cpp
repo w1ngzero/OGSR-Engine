@@ -1,10 +1,6 @@
 //---------------------------------------------------------------------------
 #include "stdafx.h"
 
-#include <set>
-#include <map>
-#include <cstring>
-#include <cctype>
 
 #include "SkeletonAnimated.h"
 
@@ -21,15 +17,6 @@
 extern int psSkeletonUpdate;
 
 using namespace animation;
-
-// DIAG (static-knife): true, если в модели есть source-слот (импортированные Source-анимации).
-bool CKinematicsAnimated::HasSourceMotions() const
-{
-    for (const auto& slot : m_Motions)
-        if (const char* sr = *slot.motions.id(); sr && strstr(sr, ":source"))
-            return true;
-    return false;
-}
 
 //////////////////////////////////////////////////////////////////////////
 // BoneInstance methods
@@ -196,21 +183,6 @@ MotionID CKinematicsAnimated::ID_Cycle_Safe(const shared_str& N)
             break;
         }
     }
-    // DIAG (static-knife): запрос ЦИКЛА из game-стороны — что просят (в т.ч. в нижнем регистре) и нашлось ли.
-    if (HasSourceMotions())
-    {
-        static std::set<xr_string> s_Log{};
-        char low[256];
-        std::size_t li = 0;
-        for (const char* p = *N; p && *p && li < 255; ++p)
-            low[li++] = static_cast<char>(tolower(static_cast<unsigned char>(*p)));
-        low[li] = 0;
-        char buf[300];
-        xr_sprintf(buf, sizeof(buf), "~~DIAG demand-cycle: %s want=%s [lower=%s] found=%d",
-                   dbg_name.c_str(), *N ? *N : "?", low, motion_ID.valid() ? 1 : 0);
-        if (s_Log.insert(xr_string(buf)).second)
-            Msg("%s", buf);
-    }
     return motion_ID;
 }
 
@@ -353,26 +325,6 @@ CBlend* CKinematicsAnimated::LL_PlayCycle(u16 part, MotionID motion_ID, BOOL bMi
     }
     if (part >= MAX_PARTS)
         return nullptr;
-
-    // DIAG (static-knife): где моушен РЕАЛЬНО стартует — имя/слот/привязка. Только для Source-моделей.
-    if (HasSourceMotions())
-    {
-        static std::set<xr_string> s_Dbg{};
-        const xr_string nm = dbg_name.c_str();
-        {
-            const auto& pnm = LL_MotionDefName_dbg(motion_ID);
-            const auto& P = m_Partition->part(part);
-            char buf[256];
-            xr_sprintf(buf, sizeof(buf), "~~DIAG play: %s part=%u partName=%s partBones=%u motion=%s:%u slot=%u",
-                       nm.c_str(), (unsigned)part, (P.Name == nullptr) ? "?" : *P.Name,
-                       (unsigned)P.bones.size(), pnm.first ? pnm.first : "?", (unsigned)motion_ID.idx,
-                       (unsigned)motion_ID.slot);
-            xr_string cur = buf;
-            if (s_Dbg.insert(cur).second)
-                Msg("%s", cur.c_str());
-        }
-    }
-
     if (m_Partition->part(part).Name == nullptr)
         return nullptr;
 
@@ -447,21 +399,6 @@ MotionID CKinematicsAnimated::ID_FX_Safe(LPCSTR N)
             motion_ID.set(u16(k), I->second);
             break;
         }
-    }
-    // DIAG (static-knife): запрос FX из game-стороны — что просят (в т.ч. в нижнем регистре) и нашлось ли.
-    if (HasSourceMotions())
-    {
-        static std::set<xr_string> s_Log{};
-        char low[256];
-        std::size_t li = 0;
-        for (const char* p = N; p && *p && li < 255; ++p)
-            low[li++] = static_cast<char>(tolower(static_cast<unsigned char>(*p)));
-        low[li] = 0;
-        char buf[300];
-        xr_sprintf(buf, sizeof(buf), "~~DIAG demand-fx: %s want=%s [lower=%s] found=%d",
-                   dbg_name.c_str(), N ? N : "?", low, motion_ID.valid() ? 1 : 0);
-        if (s_Log.insert(xr_string(buf)).second)
-            Msg("%s", buf);
     }
     return motion_ID;
 }
@@ -899,50 +836,6 @@ void CKinematicsAnimated::LL_BuldBoneMatrixDequatize(const CBoneData* bd, u8 cha
     CBlendInstance& BLEND_INST = LL_GetBlendInstance(SelfID);
     const CBlendInstance::BlendSVec& Blend = BLEND_INST.blend_vector();
     CKey BK[MAX_CHANNELS][MAX_BLENDED]; // base keys
-
-    // DIAG (static-knife): для Source-импортированных моделей раз в ~0.5с логируем состояние
-    // проигрывания ПЕРВОЙ кости: сколько блендов на ней, растёт ли время, сколько ключей в моушене.
-    //   blends=0  => моушен не привязан к кости (смотрим на lookup/LL_PlayCycle выше)
-    //   tc растёт  => анимация реально играет (кости должны двигаться) => проблема внизу (скиннинг)
-    //   count<=1    => у кости вырожденный (1 ключ) моушен
-    if (HasSourceMotions() && (SelfID == 0 || SelfID == 1 || SelfID == 2))
-    {
-        static std::map<xr_string, std::map<u16, float>> s_T{};
-        static std::map<xr_string, std::map<u16, xr_string>> s_Last{};
-        const xr_string nm = dbg_name.c_str();
-        {
-            float& t = s_T[nm][SelfID];
-            if (t == 0.f)
-                t = Device.fTimeGlobal;
-            if (Device.fTimeGlobal - t > 0.5f)
-            {
-                t = Device.fTimeGlobal;
-                char buf[320];
-                if (!Blend.empty())
-                {
-                    const CBlend* B = Blend[0];
-                    const CMotion& M = *LL_GetMotion(B->motionID, SelfID);
-                    const auto& names = LL_MotionDefName_dbg(B->motionID);
-                    xr_sprintf(buf, sizeof(buf),
-                               "~~DIAG anim bone=%u blends=%d tc=%.3f tt=%.3f speed=%.3f ch=%d count=%d pose=%s",
-                               (unsigned)SelfID, (unsigned)Blend.size(), B->timeCurrent, (float)B->timeTotal,
-                               B->speed, B->channel, (unsigned)M.get_count(),
-                               names.first ? names.first : "?");
-                }
-                else
-                {
-                    xr_sprintf(buf, sizeof(buf), "~~DIAG anim bone=%u blends=0 (motion NOT bound to this bone)", (unsigned)SelfID);
-                }
-                xr_string cur = buf;
-                if (s_Last[nm][SelfID] != cur)
-                {
-                    s_Last[nm][SelfID] = cur;
-                    Msg("%s", cur.c_str());
-                }
-            }
-        }
-    }
-
     for (BlendSVecCIt BI = Blend.begin(); BI != Blend.end(); BI++)
     {
         CBlend* B = *BI;
@@ -1027,54 +920,7 @@ void CKinematicsAnimated::BuildBoneMatrix(const CBoneData* bd, CBoneInstance& bi
     LL_BoneMatrixBuild(bi, parent, keys);
 }
 
-void CKinematicsAnimated::OnCalculateBones()
-{
-    UpdateTracks();
-
-    // DIAG (static-knife): главный индикатор для Source-моделей — у СКОЛЬКИХ костей есть активный бленд.
-    //   withBlend>0 => моушен реально привязан к костям и играет (кости в анимации) => статичен МЕШ (скиннинг внизу)
-    //   withBlend==0 => ни одна кость не анимируется (моушен вообще не проигрывается) => проблема в lookup/play
-    if (HasSourceMotions())
-    {
-        static std::map<xr_string, float> s_T{};
-        const xr_string nm = dbg_name.c_str();
-        {
-            // один раз логируем ВСЕ доступные в source-слоте имена движений
-            static std::set<xr_string> s_AvailDone{};
-            if (s_AvailDone.insert(nm).second)
-            {
-                Msg("~~DIAG avail-motions [%s]:", nm.c_str());
-                xr_string names;
-                for (auto& slot : m_Motions)
-                    if (const char* sr = *slot.motions.id(); sr && strstr(sr, ":source"))
-                    {
-                        for (auto& mm : *slot.motions.motion_map())
-                            if (const char* mn = *mm.first; mn)
-                            {
-                                names += mn;
-                                names += " ";
-                            }
-                        break;
-                    }
-                Msg("   %s", names.c_str());
-            }
-        }
-        {
-            float& t = s_T[nm];
-            if (t == 0.f)
-                t = Device.fTimeGlobal;
-            if (Device.fTimeGlobal - t > 0.5f)
-            {
-                t = Device.fTimeGlobal;
-                u32 withBlend = 0;
-                for (u32 i = 0; i < bones->size(); ++i)
-                    if (LL_GetBlendInstance(u16(i)).blend_vector().size() > 0)
-                        ++withBlend;
-                Msg("~~DIAG anim-count: %s bones=%u withBlend=%u", nm.c_str(), (unsigned)bones->size(), withBlend);
-            }
-        }
-    }
-}
+void CKinematicsAnimated::OnCalculateBones() { UpdateTracks(); }
 
 IBlendDestroyCallback* CKinematicsAnimated::GetBlendDestroyCallback() { return m_blend_destroy_callback; }
 

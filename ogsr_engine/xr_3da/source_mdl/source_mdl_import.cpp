@@ -233,6 +233,75 @@ void PutCString(std::vector<std::uint8_t>& b, const char* s)
 }
 } // namespace
 
+namespace
+{
+// Преобразует 4-костную вершину (vertBoned4W) в 2-костную (vertBoned2W).
+// Берёт две КОСТИ с наибольшим весом, отбрасывает остальные и РЕНОРМАЛИЗУЕТ.
+// Зачем: движковые HUD/руки стоковых моделей используют 1-2 кости (skin=1/2),
+// и готовых skinning-вариантов шейдера для 4 костей нет (см. ResourceManager_Resources).
+// 2-костный формат соответствует существующему шейдеру models\weapons_2 /
+// models\model_2, что и требуется для работы скиннинга (bonesArray не NULL).
+// ВАЖНО про vertBoned4W: у него w[3] веса 4-й кости НЕТ, движок считает его
+// сам как 1-w0-w1-w2 (см. SkeletonX.cpp). Поэтому собираем до 4 влияний:
+// (m0,w0),(m1,w1),(m2,w2),(m3,1-w0-w1-w2) и выбираем два самых больших.
+void Convert4WTo2W(const vertBoned4W& s, vertBoned2W& d)
+{
+    // --- подсчёт весов (включая неявный 4-й) ---
+    float bw[4];
+    u16 bm[4];
+    for (int i = 0; i < 3; ++i)
+    {
+        bw[i] = s.w[i];
+        bm[i] = s.m[i];
+    }
+    bw[3] = 1.f - s.w[0] - s.w[1] - s.w[2]; // неявный вес 4-й кости
+    bm[3] = s.m[3];
+
+    // --- 2 самых больших ---
+    int i0 = 0, i1 = 1;
+    if (bw[1] > bw[0])
+    {
+        // ручной свап (без std::swap, чтобы не зависеть от <utility>)
+        int tmp = i0;
+        i0 = i1;
+        i1 = tmp;
+    }
+    for (int i = 2; i < 4; ++i)
+    {
+        if (bw[i] > bw[i0])
+        {
+            i1 = i0;
+            i0 = i;
+        }
+        else if (bw[i] > bw[i1])
+        {
+            i1 = i;
+        }
+    }
+
+    float wsum = bw[i0] + bw[i1];
+    if (wsum <= 0.f)
+    {
+        // нет весов вообще -> прибить к кости 0.
+        d.matrix0 = 0;
+        d.matrix1 = 0;
+        d.w = 1.f;
+    }
+    else
+    {
+        d.matrix0 = bm[i0];
+        d.matrix1 = bm[i1];
+        d.w = bw[i1] / wsum; // vertBoned2W.w = вес второй кости, w0 = 1-w (см. SkeletonX.cpp)
+    }
+    d.P = s.P;
+    d.N = s.N;
+    d.T = s.T;
+    d.B = s.B;
+    d.u = s.u;
+    d.v = s.v;
+}
+} // namespace
+
 bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureName, const char* shaderName,
                               std::vector<std::uint8_t>& outBytes)
 {
@@ -270,14 +339,24 @@ bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureNa
     PutCString(texPayload, shaderName);
 
     // --- OGF_VERTICES ---
-    constexpr std::uint32_t kFVF4L = OGF_VERTEXFORMAT_FVF_4L; // из fmesh.h, точное значение
+    // ВАЖНО: эмитируем 2-костный формат (FVF_2L), а не 4-костный.
+    // 4-костному (FVF_4L) не соответствует ни один существующий skinning-вариант
+    // шейдера (default_4 / models\weapons_4), из-за чего bonesArray==NULL и анимация
+    // не применяется. Стоковые HUD-модели используют skin=1/2, и шейдеры models\weapons_1/2
+    // существуют (доказано рабочей wpn_pm_hud). Поэтому пишем 2 кости/вершину.
+    constexpr std::uint32_t kFVF2L = OGF_VERTEXFORMAT_FVF_2L; // из fmesh.h, точное значение
+    constexpr std::uint32_t kFVF4L = OGF_VERTEXFORMAT_FVF_4L; // сохранено для справки
+    (void)kFVF4L;
     std::vector<std::uint8_t> vertsPayload;
-    Put32(vertsPayload, kFVF4L);
+    Put32(vertsPayload, kFVF2L);
     Put32(vertsPayload, static_cast<std::uint32_t>(imp.verts.size()));
     for (const auto& v : imp.verts)
     {
-        const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(&v);
-        vertsPayload.insert(vertsPayload.end(), p, p + sizeof(vertBoned4W));
+        // 4-костный vert по конвейеру -> 2-костный в OGF.
+        vertBoned2W twoW{};
+        Convert4WTo2W(v, twoW);
+        const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(&twoW);
+        vertsPayload.insert(vertsPayload.end(), p, p + sizeof(vertBoned2W));
     }
 
     // --- OGF_INDICES ---
@@ -303,7 +382,7 @@ bool TryAutoBuildSkeletonOGF(const char* N, std::vector<std::uint8_t>& outBytes)
 
     // Материал для Source-меша: те же значения, что в LoadSourceMeshGeometry.
     static const char* const sSourceMeshTexture = "models\\hands\\c_hands";
-    static const char* const sSourceMeshShader = "default";
+    static const char* const sSourceMeshShader = "models\\weapons";
 
     // 1) Геометрия (нужна и для bb/bs, и как child-визуал).
     SourceMdl::SourceMeshImport imp;

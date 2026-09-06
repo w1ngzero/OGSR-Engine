@@ -4,7 +4,6 @@
 
 #include "stdafx.h"
 
-#include <set>
 
 #include "../../xr_3da/render.h"
 
@@ -171,24 +170,6 @@ void dxRender_Visual::Load(const char* N, IReader* data, u32)
         dbg_texture_name = fnT;
         dbg_shader_name = fnS;
         shader = GetCachedModelShader(fnS, fnT);
-
-        // DIAG (static-knife): фиксируем, КАКОЙ шейдер и с КАКОЙ опцией скиннинга берётся для модели.
-        //   skin=4 => создан скин-вариант (default_4.vs); если bonesArray всё равно NULL — у этого
-        //   шейдера нет скин-технологии (нет константы sbones_array) => надо другой шейдер.
-        //   skin=-1 => модель загрузилась НЕ как скин (флаг скиннинга не был выставлен при создании
-        //   шейдера) => проблема порядка создания техники, а не самого шейдера.
-        {
-            static std::set<xr_string> s_DiagDone{};
-            const int skinOpt = RImplementation.shader_option_skinning();
-            if (skinOpt >= 1)
-            {
-                char buf[320];
-                xr_sprintf(buf, sizeof(buf), "~~DIAG shader: model=%s shader=%s tex=%s skin=%d hud=%d",
-                           N, fnS, fnT, skinOpt, ::Render->shader_option_hud_loading() ? 1 : 0);
-                if (s_DiagDone.insert(xr_string(buf)).second)
-                    Msg("%s", buf);
-            }
-        }
     }
 }
 
