@@ -76,6 +76,9 @@ private:
     DEFINE_VECTOR(SMotionsSlot, MotionsSlotVec, MotionsSlotVecIt);
     MotionsSlotVec m_Motions;
 
+    // DIAG (static-knife): true, если есть source-слот (импортированные Source-анимации).
+    bool HasSourceMotions() const;
+
     CPartition* m_Partition;
 
     IBlendDestroyCallback* m_blend_destroy_callback;
