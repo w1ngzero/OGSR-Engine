@@ -701,3 +701,27 @@ Zip: `xray_source_patch/github_upload_ogsr_engine.zip` = 161 879 б (Sep 6 06:29
 
 Описано в TEST_ONSCREEN.md (см. §5 «wpn_hud») — модель теперь можно класть в виде
 `<name>.mdl` (+ `.vvd`/`.vtx`), движок сам соберёт визуал.
+
+## Round 18 — фикс краша при первом проигрывании анимации (OGF_S_MOTIONS не был суб-чанкован)
+
+**Симптом (on-screen, нож v_knife):** модель грузится, берётся в руки, висит статично, но при
+первом проигрывании именованной анимации (`anm_attack`/`anm_hide`) движок падает:
+`std::vector::_Xrange()` → `out_of_range` в `CKinematicsAnimated::LL_PlayCycle` →
+`IBlendSetup` → `bone_motions->at(motion_ID.idx)`.
+
+**Причина.** `motions_value::load()` (xr_3da/SkeletonMotions.cpp) читает `OGF_S_MOTIONS` как
+НАБОР СУБ-ЧАНКОВ: `r_chunk_safe(0,&dwCNT,...)` затем для каждого `m_idx` `find_chunk(m_idx+1)`.
+А `BuildXRayMotionsOMF` писал **плоский** поток (`W32(dwCNT)` + сырые по-костные каналы подряд).
+В итоге `r_chunk_safe(0)` не находил суб-чанк 0 → `dwCNT=0` → `m_motions[bone].resize(0)` →
+`bone_motions` пусты. При этом `OGF_S_SMPARAMS` (плоский и читаемый напрямую) загружался верно:
+40 `CMotionDef` + карту `m_cycle` (имя→idx). Значит любой поиск анимации находил валидный
+`MotionID(slot,idx)` с `idx<40`, но `bone_motions[root]` имел размер 0 → `at(idx)` вылетал.
+
+**Доказательство (test_omf_chunking.cpp, engine-free):**
+- старый плоский формат: `r_chunk_safe(0)` → FAIL, `dwCNT=0`, 0 движений;
+- новый формат: `dwCNT=3`, движения читаются по порядку (idle, draw, holster).
+Итог: `RESULT: NEW=OK`, `RESULT: OLD=misparsed`.
+
+**Фикс.** В `BuildXRayMotionsOMF` каждое движение теперь сериализуется в отдельный суб-чанк
+(id = m_idx+1), а `dwCNT` — в суб-чанк 0. Формат тела движения (имя, len, по-костные каналы)
+не менялся. Точечный чанк-контейнерный фикс, без изменения формата файла движка.

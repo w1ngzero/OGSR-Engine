@@ -230,14 +230,26 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
     }
 
     // === OGF_S_MOTIONS ===
+    // motions_value::load() читает этот чанк НЕ как плоский поток, а как набор СУБ-ЧАНКОВ:
+    //   [chunk id=0][u32 dwCNT]  — счётчик движений (r_chunk_safe(0, &dwCNT, ...))
+    //   [chunk id=1][motion0 payload]   (find_chunk(1) -> имя, len, по-костные каналы)
+    //   [chunk id=2][motion1 payload]   ...
+    // Поэтому каждое движение сериализуется в отдельный суб-чанк (id = m_idx+1), а НЕ в общий
+    // плоский буфер (это была причина краха: циклическая карта (m_cycle) строилась из SMPARAMS,
+    // но bone_motions оставались пустыми -> out_of_range при первом проигрывании анимации).
     std::vector<std::uint8_t> MS;
-    W32(MS, nSeq); // dwCNT
+    {
+        std::vector<std::uint8_t> c0;
+        W32(c0, nSeq);
+        WChunk(MS, 0u, c0); // dwCNT = число движений
+    }
     for (u32 s = 0; s < nSeq; ++s)
     {
-        WStr(MS, seqs[s].name.c_str());
+        std::vector<std::uint8_t> body;
+        WStr(body, seqs[s].name.c_str());
         // Единое число кадров на последовательность (source numframes; все каналы приведены к нему).
         const std::uint32_t dwLen = seqs[s].numframes > 0 ? static_cast<std::uint32_t>(seqs[s].numframes) : 1u;
-        W32(MS, dwLen);
+        W32(body, dwLen);
         for (u32 b = 0; b < nBones; ++b)
         {
             ANIM_TRACK hold;
@@ -257,44 +269,45 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
             if (rAbsent) flags |= flRKeyAbsent;
             if (tPresent) flags |= flTKeyPresent;
             if (t16 && tPresent) flags |= flTKey16IsBit;
-            W8(MS, flags);
+            W8(body, flags);
 
             if (rAbsent)
             {
-                W16(MS, M._keysR[0].x); W16(MS, M._keysR[0].y); W16(MS, M._keysR[0].z); W16(MS, M._keysR[0].w);
+                W16(body, M._keysR[0].x); W16(body, M._keysR[0].y); W16(body, M._keysR[0].z); W16(body, M._keysR[0].w);
             }
             else
             {
-                W32(MS, 0u); // crc (не проверяется загрузчиком)
+                W32(body, 0u); // crc (не проверяется загрузчиком)
                 for (std::uint32_t f = 0; f < dwLen; ++f)
                 {
-                    W16(MS, M._keysR[f].x); W16(MS, M._keysR[f].y); W16(MS, M._keysR[f].z); W16(MS, M._keysR[f].w);
+                    W16(body, M._keysR[f].x); W16(body, M._keysR[f].y); W16(body, M._keysR[f].z); W16(body, M._keysR[f].w);
                 }
             }
 
             if (tPresent)
             {
-                W32(MS, 0u); // crc
+                W32(body, 0u); // crc
                 if (t16)
                     for (std::uint32_t f = 0; f < dwLen; ++f)
                     {
-                        W16(MS, M._keysT16[f].x1); W16(MS, M._keysT16[f].y1); W16(MS, M._keysT16[f].z1);
+                        W16(body, M._keysT16[f].x1); W16(body, M._keysT16[f].y1); W16(body, M._keysT16[f].z1);
                     }
                 else
                     for (std::uint32_t f = 0; f < dwLen; ++f)
                     {
-                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].x1));
-                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].y1));
-                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].z1));
+                        W8(body, static_cast<std::uint8_t>(M._keysT8[f].x1));
+                        W8(body, static_cast<std::uint8_t>(M._keysT8[f].y1));
+                        W8(body, static_cast<std::uint8_t>(M._keysT8[f].z1));
                     }
-                WFloat(MS, M._sizeT.x); WFloat(MS, M._sizeT.y); WFloat(MS, M._sizeT.z);
-                WFloat(MS, M._initT.x); WFloat(MS, M._initT.y); WFloat(MS, M._initT.z);
+                WFloat(body, M._sizeT.x); WFloat(body, M._sizeT.y); WFloat(body, M._sizeT.z);
+                WFloat(body, M._initT.x); WFloat(body, M._initT.y); WFloat(body, M._initT.z);
             }
             else
             {
-                WFloat(MS, M._initT.x); WFloat(MS, M._initT.y); WFloat(MS, M._initT.z);
+                WFloat(body, M._initT.x); WFloat(body, M._initT.y); WFloat(body, M._initT.z);
             }
         }
+        WChunk(MS, s + 1u, body); // каждое движение — отдельный суб-чанк (id = m_idx+1)
     }
 
     WChunk(outBytes, OGF_S_SMPARAMS, SP);
