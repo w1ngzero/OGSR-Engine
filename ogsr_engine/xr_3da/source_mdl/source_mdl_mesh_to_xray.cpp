@@ -66,18 +66,24 @@ bool BuildXRayMesh(const MESH& src, const int* boneMap, const Fmatrix& basis,
         const int n = NormalizeWeights(wt, bi, sv.num_weights);
 
         // По умолчанию "ничего" -> кость 0.
+        // ВАЖНО: vertBoned4W имеет m[4] (4 индекса костей) и w[3] (ТОЛЬКО 3 веса) + u,v —
+        // вес 4-й кости движок считает сам как 1-w0-w1-w2 (см. SkeletonX.cpp). Записывать
+        // dv.w[3] НЕЛЬЗЯ: он вылезает за пределы массива и затирает поле u (U-координата
+        // текстуры каждой вершины становится 0). Пишем только w[0..2].
         for (int i = 0; i < 4; ++i)
         {
             if (i >= n || bi[i] < 0)
             {
                 dv.m[i] = 0;
-                dv.w[i] = (i == 0) ? 1.f : 0.f;
+                if (i < 3)
+                    dv.w[i] = (i == 0) ? 1.f : 0.f;
                 bi[i] = 0;
             }
             else
             {
                 dv.m[i] = static_cast<u16>(bi[i]);
-                dv.w[i] = wt[i];
+                if (i < 3)
+                    dv.w[i] = wt[i];
             }
         }
         outVerts.push_back(dv);
