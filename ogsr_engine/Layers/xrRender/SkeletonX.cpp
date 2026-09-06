@@ -140,10 +140,9 @@ void CSkeletonX::_Render(CBackend& cmd_list, ref_geom& hGeom, u32 vCount, u32 iO
                 // DIAG (static-knife): показать ВСЁ, что сходится в этом узле, чтобы понять, почему
                 // HW-скиннинг не получает sbones_array. bonesArray=NULL => в таблице констант
                 // загруженного шейдера нет 'sbones_array'; RenderMode<0 => опция скиннинга не задана.
-                Msg("~~DIAG skinning-fail: RenderMode=%d RMS_bonecount=%u shader=[%s] texture=[%s] "
+                Msg("~~DIAG skinning-fail: RenderMode=%d RMS_bonecount=%u "
                     "usedBones=%u parentBones=%u bonesArray=%s oldArray=%s",
                     (int)RenderMode, RMS_bonecount,
-                    this->dbg_shader_name.c_str(), this->dbg_texture_name.c_str(),
                     (unsigned)BonesUsed.size(), (unsigned)Parent->LL_BoneCount(),
                     c_bones_array ? "OK" : "NULL", c_bones_array_old ? "OK" : "NULL");
             }
