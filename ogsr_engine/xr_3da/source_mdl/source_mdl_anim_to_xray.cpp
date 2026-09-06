@@ -120,17 +120,22 @@ int BuildXRayMotions(const ANIM_SEQ& seq, std::vector<CMotion>& outMotions, bool
 
 namespace
 {
-// Построить "дефолтный" трек кости (одна identity-поза) — чтобы у костей, не анимированных в
-// данной последовательности, движение всё равно было валидным (кость держит bind-позу).
-inline ANIM_TRACK MakeHoldTrack(int bone)
+// Построить "hold"-трек кости: N кадров identity-позы (не один!) — потому что в OMF-формате
+// у всех костей последовательности ОДИН общий счётчик кадров (len), и у не-анимированной кости
+// движение должно иметь ровно N кадров, иначе кость "уедет" в garbage на кадрах >0.
+inline ANIM_TRACK MakeHoldTrack(int bone, int nframes)
 {
     ANIM_TRACK tr;
     tr.bone = bone;
     tr.delta = false;
-    ANIM_FRAME f0;
-    f0.rot = {0.f, 0.f, 0.f, 1.f}; // identity
-    f0.pos = {0.f, 0.f, 0.f};
-    tr.frames.push_back(f0);
+    tr.frames.reserve(static_cast<std::size_t>(nframes > 0 ? nframes : 1));
+    for (int f = 0; f < (nframes > 0 ? nframes : 1); ++f)
+    {
+        ANIM_FRAME f0;
+        f0.rot = {0.f, 0.f, 0.f, 1.f}; // identity
+        f0.pos = {0.f, 0.f, 0.f};
+        tr.frames.push_back(f0);
+    }
     return tr;
 }
 
@@ -239,7 +244,7 @@ bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bone
             const ANIM_TRACK* tr = FindTrack(seqs[s], static_cast<int>(b));
             if (!tr || tr->frames.empty())
             {
-                hold = MakeHoldTrack(static_cast<int>(b));
+                hold = MakeHoldTrack(static_cast<int>(b), static_cast<int>(dwLen));
                 tr = &hold;
             }
             CMotion M;
