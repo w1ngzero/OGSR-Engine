@@ -157,6 +157,10 @@ protected:
     // See source_mdl_import.h.
     bool LoadSourceMeshGeometry(const char* N);
 
+    // 1 = скелет был импортирован из Source .MDL (LoadSourceSkeleton). Используется
+    // CKinematicsAnimated::Load, чтобы подхватить анимации из того же .mdl вместо .omf/.ogf.
+    bool m_source_imported = false;
+
     virtual void IBoneInstances_Create();
     virtual void IBoneInstances_Destroy();
 

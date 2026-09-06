@@ -4,6 +4,9 @@
 #include "stdafx.h"
 #include "source_mdl_anim_to_xray.h"
 #include "source_mdl_anim_q.h"
+#include "../motion.h" // esmCycle/esmFX/esmStopAtEnd ...
+#include "../fmesh.h"  // OGF_S_SMPARAMS / OGF_S_MOTIONS / xrOGF_SMParamsVersion
+#include <cstring>
 
 namespace SourceMdl
 {
@@ -113,5 +116,184 @@ int BuildXRayMotions(const ANIM_SEQ& seq, std::vector<CMotion>& outMotions, bool
         }
     }
     return built;
+}
+
+namespace
+{
+// Построить "дефолтный" трек кости (одна identity-поза) — чтобы у костей, не анимированных в
+// данной последовательности, движение всё равно было валидным (кость держит bind-позу).
+inline ANIM_TRACK MakeHoldTrack(int bone)
+{
+    ANIM_TRACK tr;
+    tr.bone = bone;
+    tr.delta = false;
+    ANIM_FRAME f0;
+    f0.rot = {0.f, 0.f, 0.f, 1.f}; // identity
+    f0.pos = {0.f, 0.f, 0.f};
+    tr.frames.push_back(f0);
+    return tr;
+}
+
+// Баговый примитивным записыватель LE-байтов (не в ядре OMF, а для сборки потока).
+void W8(std::vector<std::uint8_t>& b, std::uint8_t v) { b.push_back(v); }
+void W16(std::vector<std::uint8_t>& b, std::uint16_t v)
+{
+    b.push_back(static_cast<std::uint8_t>(v & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+}
+void W32(std::vector<std::uint8_t>& b, std::uint32_t v)
+{
+    b.push_back(static_cast<std::uint8_t>(v & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 16) & 0xff));
+    b.push_back(static_cast<std::uint8_t>((v >> 24) & 0xff));
+}
+void WFloat(std::vector<std::uint8_t>& b, float f)
+{
+    std::uint32_t u;
+    std::memcpy(&u, &f, 4);
+    W32(b, u);
+}
+void WStr(std::vector<std::uint8_t>& b, const char* s)
+{
+    if (!s)
+        s = "";
+    while (*s)
+        b.push_back(static_cast<std::uint8_t>(*s++));
+    b.push_back(0);
+}
+// Пишет чанк-контейнер id;size;payload (как IWriter::open_chunk).
+void WChunk(std::vector<std::uint8_t>& b, std::uint32_t id, std::vector<std::uint8_t>& payload)
+{
+    W32(b, id);
+    W32(b, static_cast<std::uint32_t>(payload.size()));
+    b.insert(b.end(), payload.begin(), payload.end());
+}
+
+// Найти трек кости в последовательности (иначе nullptr).
+const ANIM_TRACK* FindTrack(const ANIM_SEQ& seq, int bone)
+{
+    for (const ANIM_TRACK& t : seq.tracks)
+        if (t.bone == bone)
+            return &t;
+    return nullptr;
+}
+} // namespace
+
+// Сериализует декодированные Source-последовательности в байты движкового OMF (chunks
+// OGF_S_SMPARAMS + OGF_S_MOTIONS) — ровно так, как читает motions_value::load(). Поток затем
+// отдаётся стандартному загрузчику (shared_motions::create(key, CTempReader(байты), bones)),
+// который сам собирает partitions/motion-defs/per-bone CMotion (проверено на round-trip см.
+// VERIFICATION.md Раунд 15). Это обходит приватные поля CMotionDef (speed/power/accrue/falloff).
+bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bones,
+                         std::vector<std::uint8_t>& outBytes, bool useT16)
+{
+    outBytes.clear();
+    if (!bones || bones->empty())
+    {
+        Msg("!! [SourceMotions] no bones to build motion stream from");
+        return false;
+    }
+    const u32 nBones = static_cast<u32>(bones->size());
+    const u32 nSeq = static_cast<u32>(seqs.size()); // может быть 0 -> валидный пустой набор (0 движений)
+
+    // === OGF_S_SMPARAMS ===
+    std::vector<std::uint8_t> SP;
+    W16(SP, static_cast<std::uint16_t>(xrOGF_SMParamsVersion)); // 4
+    W16(SP, 1);                                                // part_count
+    // part 0 "default" — все кости (identity-remap: m_idx == engine bone index)
+    WStr(SP, "default");
+    W16(SP, static_cast<std::uint16_t>(nBones));
+    for (u32 b = 0; b < nBones; ++b)
+    {
+        WStr(SP, (*bones)[b]->name.c_str());
+        W32(SP, b);
+    }
+    W16(SP, static_cast<std::uint16_t>(nSeq)); // mot_count
+    for (u32 s = 0; s < nSeq; ++s)
+    {
+        WStr(SP, seqs[s].name.c_str());
+        const std::uint32_t dwFlags = seqs[s].loop ? 0u : (esmStopAtEnd);
+        W32(SP, dwFlags);
+        W16(SP, 0);    // bone_or_part = part 0
+        W16(SP, static_cast<std::uint16_t>(s)); // motion id
+        WFloat(SP, 1.f); // speed
+        WFloat(SP, 1.f); // power
+        WFloat(SP, 1.f); // accrue
+        WFloat(SP, 1.f); // falloff
+        W32(SP, 0u);     // версия>=4: cnt(marks)=0
+    }
+
+    // === OGF_S_MOTIONS ===
+    std::vector<std::uint8_t> MS;
+    W32(MS, nSeq); // dwCNT
+    for (u32 s = 0; s < nSeq; ++s)
+    {
+        WStr(MS, seqs[s].name.c_str());
+        // Единое число кадров на последовательность (source numframes; все каналы приведены к нему).
+        const std::uint32_t dwLen = seqs[s].numframes > 0 ? static_cast<std::uint32_t>(seqs[s].numframes) : 1u;
+        W32(MS, dwLen);
+        for (u32 b = 0; b < nBones; ++b)
+        {
+            ANIM_TRACK hold;
+            const ANIM_TRACK* tr = FindTrack(seqs[s], static_cast<int>(b));
+            if (!tr || tr->frames.empty())
+            {
+                hold = MakeHoldTrack(static_cast<int>(b));
+                tr = &hold;
+            }
+            CMotion M;
+            BuildXRayMotion(*tr, M, true, true, useT16);
+
+            const bool rAbsent = M.test_flag(flRKeyAbsent);
+            const bool tPresent = M.test_flag(flTKeyPresent);
+            const bool t16 = M.test_flag(flTKey16IsBit);
+            std::uint8_t flags = 0;
+            if (rAbsent) flags |= flRKeyAbsent;
+            if (tPresent) flags |= flTKeyPresent;
+            if (t16 && tPresent) flags |= flTKey16IsBit;
+            W8(MS, flags);
+
+            if (rAbsent)
+            {
+                W16(MS, M._keysR[0].x); W16(MS, M._keysR[0].y); W16(MS, M._keysR[0].z); W16(MS, M._keysR[0].w);
+            }
+            else
+            {
+                W32(MS, 0u); // crc (не проверяется загрузчиком)
+                for (std::uint32_t f = 0; f < dwLen; ++f)
+                {
+                    W16(MS, M._keysR[f].x); W16(MS, M._keysR[f].y); W16(MS, M._keysR[f].z); W16(MS, M._keysR[f].w);
+                }
+            }
+
+            if (tPresent)
+            {
+                W32(MS, 0u); // crc
+                if (t16)
+                    for (std::uint32_t f = 0; f < dwLen; ++f)
+                    {
+                        W16(MS, M._keysT16[f].x1); W16(MS, M._keysT16[f].y1); W16(MS, M._keysT16[f].z1);
+                    }
+                else
+                    for (std::uint32_t f = 0; f < dwLen; ++f)
+                    {
+                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].x1));
+                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].y1));
+                        W8(MS, static_cast<std::uint8_t>(M._keysT8[f].z1));
+                    }
+                WFloat(MS, M._sizeT.x); WFloat(MS, M._sizeT.y); WFloat(MS, M._sizeT.z);
+                WFloat(MS, M._initT.x); WFloat(MS, M._initT.y); WFloat(MS, M._initT.z);
+            }
+            else
+            {
+                WFloat(MS, M._initT.x); WFloat(MS, M._initT.y); WFloat(MS, M._initT.z);
+            }
+        }
+    }
+
+    WChunk(outBytes, OGF_S_SMPARAMS, SP);
+    WChunk(outBytes, OGF_S_MOTIONS, MS);
+    return true;
 }
 } // namespace SourceMdl

@@ -253,6 +253,11 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
                 tr.frames.reserve(static_cast<std::size_t>(nframes));
 
                 // Смещение к mstudioanim_valueptr_t с учётом впереди лежащих RAW-полей.
+                // RAW-поля в этих (GMod/converted) .mdl лежат ПОВОРОТ ПЕРВЫМ, потом позиция
+                // (проверено на реальных RAWROT2+RAWPOS: разворот кв. в начале канала всегда
+                // даёт |q|=1, см. VERIFICATION.md Раунд 13). Сам же valueptr у СЖАТЫХ каналов
+                // идёт ПОЗИЦИЯ ПЕРВОЙ, затем ПОВОРОТ (проверено статистически: rot-first даёт в
+                // ~5 раз больше нарушений x²+y²+z²>1 на каналах с обоими типами).
                 std::size_t rawSize = 0;
                 if (rawrot2)
                     rawSize += 8;
@@ -260,8 +265,8 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
                     rawSize += 6;
                 if (rawpos)
                     rawSize += 6;
-                const std::size_t rotVP = data_off + rawSize;                      // для animrot
-                const std::size_t posVP = rotVP + ((animrot) ? (6u) : 0u);         // для animpos
+                const std::size_t posVP = data_off + rawSize;                      // для animpos (первый)
+                const std::size_t rotVP = posVP + ((animpos) ? (6u) : 0u);         // для animrot (второй)
 
                 // Читатель одной оси RLE-потока. Смещение — относительное к началу valueptr.
                 auto decodeAxis = [&](std::size_t vpBase, int axis, std::vector<std::int16_t>& out) -> bool
@@ -322,6 +327,7 @@ EAnimResult ReadSourceAnims(const void* data, std::size_t size, std::vector<ANIM
                 for (int f = 0; f < nframes; ++f)
                 {
                     ANIM_FRAME fr{};
+                    fr.rot = {0.f, 0.f, 0.f, 1.f}; // identity по умолчанию (если канал поворота отсутствует)
                     if (hasConstRot)
                         fr.rot = constRot;
                     else if (!qx.empty() && !qy.empty() && !qz.empty())

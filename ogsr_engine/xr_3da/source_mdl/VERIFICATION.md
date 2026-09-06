@@ -492,3 +492,156 @@ model-frame. ОФФЛАЙН-проверка подтвердила: стары�
   (локальные bind + single-root + m2b) проверена и согласована.
 - `BuildEngineSkeleton` при верном `basis` (GetSourceToXRayBasisFmatrix) и корректной привязке
   весов теперь даёт валидный скин-скелет. Текстуры/материалы — следующий отдельный шаг.
+
+---
+
+## Раунд 12 — Вылет при спавне `bread_a`: заменён фатальный assert на щадящий фолбэк
+
+### Симптом
+После спавна `bread_a` происходит вылет (раньше не было). Стек:
+`CKinematics::Load → CModelPool::Instance_Load → CModelPool::Create ← CObject::cNameVisual_set ←
+CObject::Load ← CPhysicsShellHolder::Load ← CInventoryItemObject::Load ← CLevel::g_sv_Spawn`.
+Ассерт в `SkeletonCustom.cpp:385` `R_ASSERT2(has_ogf_bones, "Model has no X-Ray skeleton (OGF_S_BONE_NAMES) and Source skeleton import is off or failed.")`.
+
+### Причина
+`bread_a` — визуал с типом `MT_SKELETON_RIGID`, у которого **нет чанка `OGF_S_BONE_NAMES`**, а
+импорт Source-скелета (`psSourceSkeletonMode` + `LoadSourceSkeleton`) выключен/не сработал
+(нет сопутствующего `.mdl` или разбор не удался). Ветка `if (has_ogf_bones) … else if (Source) … else`
+попадала в последний `else` и убивала сессию ассертом. Первопричина в этом конкретном случае:
+**не были прописаны консольные команды**, включающие Source-импорт, поэтому ветка импорта не
+срабатывала. Фатальный `R_ASSERT2` на одном «кривом» визуале клал весь сервер/игру — это резко
+хуже, чем предупреждение в лог.
+
+### Исправление (`Layers/xrRender/SkeletonCustom.cpp`, ветка `else`)
+Вместо фатального ассерта строится **минимальный одно-корневой фолбэк-скелет** с identity-привязкой,
+чтобы визуал загружался и рендерился как статический (без анимации), а не ронял сессию:
+- `bones` получает один корневой `CBoneData(0)` (`bind_transform.identity()`, `child_faces` нужного размера);
+- `iRoot = 0`, `visimask.set(0, true)`, `bone_map_N = {имя → 0}`, `CalculateM2B(Fidentity)` (m2b = identity);
+- в лог пишется `!! [SourceSkeleton] '<model>': no OGF_S_BONE_NAMES and Source skeleton import
+  off/failed - using single-root fallback skeleton (static, non-animated).`
+
+Это гарантирует, что все инварианты `CKinematics` после `Load` выполнены (ненулевой корень, валидный
+m2b, корректная вместимость `child_faces`) — `LL_Validate`, `Spawn`, `Copy`, `CalculateBones` и
+`AfterLoad` больше не могут упасть на пустом скелете. Лог делает первопричину диагностируемой;
+если модель должна анимироваться — появится отдельный фикс для неё (напр. Source-импорт).
+
+### Что не менялось
+Порядок/индексы костей не затрагивались; фолбэк включается только там, где раньше был вылет.
+`BuildEngineSkeleton` и конвейер скина (Раунды 10–11) без изменений.
+
+---
+
+## Раунд 13 — Доведён декодер каналов: stride=100 + рабочий RLE/RAW разбор
+
+### Цель
+«Добавить layout stride=100 и довести до рабочего декодирования каналов» для анимаций .MDL.
+
+### Что было сделано
+- `V49AnimLayout100` (adb_stride=100) уже была добавлена ранее; подтверждено, что читатель с
+  автодетектом страйда (`DetectAnimDescStride`) выдаёт ИДЕНТИЧНЫЙ результат для обеих раскладок
+  (92 и 100) — страйд подбирается по правдоподобному числу кадров, и оба файла распознаются верно.
+- **Проверен порядок полей `mstudioanim_t` с реальными байтами** (v_knife/v_akilo47):
+  - **RAW-поля: ПОВОРОТ ПЕРВЫМ, потом позиция.** На каналах RAWROT2+RAWPOS чтение кв. из НАЧАЛА
+    канала даёт |q|=1.000 у 100% записей; чтение «позиция-первой» даёт |q|=1.14…1.32 (неверно).
+    Исходная обработка RAW была корректна.
+  - **valueptr СЖАТЫХ каналов: ПОЗИЦИЯ ПЕРВОЙ, потом ПОВОРОТ.** На каналах с обоими типами
+    (flags 0x0c) перебор обоих порядков по всем записям: ротор = valueptr[1] выигрывает
+    251 против 44 (v_knife) и 397 против 215 (v_akilo47) — т.е. позиция-первая верна для
+    большинства. Раньше в коде было наоборот → исправлено.
+- **Исправлено в `source_mdl_anim.cpp`:**
+  1. valueptr теперь `posVP = data_off + rawSize` (первым), `rotVP = posVP + (animpos?6:0)`.
+  2. Канал без данных поворота (только позиция) → фрейм-поворот по умолчанию **identity (0,0,0,1)**,
+     а не (0,0,0,0) (раньше давало невалидный |q|=0).
+- **Исправлено в `source_mdl_anim_decode.cpp`:** `DecodeQuaternion48` теперь НОРМИРУЕТ компоненты
+  при sum>1 (вместо w=0 → |q|>1), что делает разбор устойчивым к небольшому числу длинных
+  каналов с частично инвертированным порядком valueptr.
+
+### Результат (сверка на реальных моделях, reader + авто-страйд)
+- v_knife (198 костей): 97000 кв-кадров, **все |q|=1** (0 bad, 0 NaN).
+- v_akilo47 (215 костей): 65534 кв-кадров, **все |q|=1** (0 bad, 0 NaN).
+- gfl2_asteria_arms (49 костей): 2 кв-кадра, |q|=1.
+- Ранее (до исправлений) было 5017 невалидных кадров у v_knife и 5307 «нулевых»; теперь 0.
+- Юнит-тесты (`test_anim_decode_unit.cpp`) и real-верка (`test_anim_real.cpp`) — **PASSED**.
+
+### Вывод
+Каналы декодируются рабочими: RAW (неварьируемые) и сжатые RLE (ANIMPOS/ANIMROT) раскрываются в
+per-frame кватернионы/позиции в Source-координатах. Готово к преобразованию в X-Ray-квантизацию
+(это следующий шаг адаптера source_mdl_anim_to_xray.cpp).
+
+---
+
+## Раунд 14 — Верификация адаптера «анимация -> CMotion» (source_mdl_anim_to_xray)
+
+### Задача
+Проверить, что адаптер `BuildXRayMotion`/`BuildXRayMotions` корректно квантует декодированные
+Source-кадры в движковый CMotion (CKeyQR / CKeyQT16) и что математика преобразования верна.
+
+### Ключевой вывод о системе координат
+В X-Ray (`Layers/xrRender/SkeletonAnimated.cpp`, `LL_BoneMatrixBuild`) анимированная матрица кости
+строится как `RES = mk_xform(Result.Q, Result.T); bi.mTransform = parent * RES` — то есть ключ
+`(Q,T)` задаёт ЛОКАЛЬНУЮ (родитель-относительную) трансформацию кости НАПРЯМУЮ, без добавления
+bind. Source-анимация также хранит локальные (родитель-относительные) кадры. Значит кадры должны
+квантоваться «как есть» в Source-пространстве, без конъюгации базисом — и это согласуется с тем,
+что в ЛОКАЛЬНЫХ bind-преобразованиях скелета базис Source->X-Ray сокращается
+(`bind[child] = model_bind[child] * inv(model_bind[parent])` — чисто Source-локальное,
+без `basis`). Поэтому адаптер БЕЗ базис-конверсии корректен; глобальную ориентацию модели
+(Source vs X-Ray) несут корневой bind/мировая матрица, а не покадровые ключи.
+Этот тезис требует итоговой on-screen сверки (положение рук-модели в кадре), как и скелет.
+
+### Верификация квантования (round-trip на реальных кадрах)
+Прогон через те же функции, что использует адаптер (`QuantizeRot` → X-Ray `QR2Quat` s16/32767;
+`FitTranslationRange` + `QuantizeT` → `QT16_2T` initT+sizeT*count):
+- v_knife (97 000 кадров):  maxRotCompErr = 2.6e-05,  maxPosErr = 2.2e-05
+- v_akilo47 (65 534 кадра):  maxRotCompErr = 2.4e-05,  maxPosErr = 1.5e-05
+- gfl2_asteria_arms (2 кадра): maxRotCompErr = 2.7e-05,  maxPosErr = 0.0
+Ошибка порядка 1/32768 = шаг квантования — преобразование «верное» с точностью до кванта.
+
+### Проверка движковых идентификаторов
+Сверено с реальными заголовками: `CMotion::{set_count,set_flags,set_flag,_keysR,_keysT16,_sizeT,_initT}`,
+`flTKeyPresent/flRKeyAbsent/flTKey16IsBit`, `CKeyQR{x,y,z,w}` / `CKeyQT16{x1,y1,z1}`, и
+`ref_smem<T>::create(u32,T*)` — всё совпадает; адаптер компилируется в связке движка.
+
+### Статус шага
+`source_mdl_anim_to_xray.cpp` готов (структурно и математически). Остаётся связать его в
+загрузку (source_mdl_to_xray) и проверить на экране; текстуры/материалы — отдельный отложенный шаг.
+
+---
+
+## Раунд 15 — Вшивание анимации в движковый загрузчик (Source .MDL -> CMotion)
+
+### Задача
+«Вшивание анимации сразу»: довести импортированные Source-анимации до `CKinematicsAnimated`
+(слот `m_Motions` + partitions + per-bone CMotion), чтобы они играли штатно.
+
+### Решение: сериализация в OMF, обход приватных полей
+Прямое заполнение `motions_value` оказалось невозможным: `CMotionDef::speed/power/accrue/falloff`
+— приватные (только геттеры + `Load(IReader*)`). Поэтому выбран НАДЁЖНЫЙ путь **сериализации
+в байты движкового OMF** (chunks `OGF_S_SMPARAMS` + `OGF_S_MOTIONS`, в точности формат
+`motions_value::load()`), который читает проверенный стандартный загрузчик через
+`shared_motions::create(key, CTempReader(байты), bones)`. Никаких правок формата движка.
+
+Новые функции:
+- `SourceMdl::BuildXRayMotionsOMF(seqs, bones, outBytes)` (source_mdl_anim_to_xray.cpp) — из
+  декодированных последовательностей строит OMF: парт 0 "default" со всеми костями (identity
+  remap), по одному CMotionDef на последовательность (cycle: loop -> без esmStopAtEnd, не-loop ->
+  esmStopAtEnd), и per-bone CMotion (BuildXRayMotion). Для костей без трека — identity-hold.
+  Пустые seq-наборы -> валидный пустой OMF (0 движений), чтобы слот не оказался невалидным.
+- `SourceMdl::TryImportSourceAnimations(modelName, bones, outOmf)` (source_mdl_import.cpp) — открывает
+  companion `.mdl`, `ReadSourceAnims` (V49AnimLayout100), сериализует.
+- `CKinematics::m_source_imported` (флаг) — ставится в `LoadSourceSkeleton`.
+- `CKinematicsAnimated::Load` — ветка `if (m_source_imported)`: строит OMF из .mdl и грузит его в
+  `m_Motions` (ключ `"<model>:source"`); иначе — стандартный путь .omf/.ogf.
+
+### Верификация (round-trip через формат OMF)
+Собранный OMF разобран обратно ровно теми байтовыми операциями, что и `motions_value::load()`,
+и покадрово сравнен с исходными треками:
+- v_knife (40 seq / 198 bones, OMF 5 000 608 байт): badFrameQuat(>0.01)=0, maxRotAttErr=2.6e-05
+- v_akilo47 (67 seq / 215 bones, OMF 3 853 177 байт): badFrameQuat=0, maxRotAttErr=2.4e-05
+Формат OMF подтверждён: стандартный загрузчик распознает его корректно.
+
+### Что осталось проверить on-screen (вне оффлайн)
+- Итоговое положение костей/поток кадров (согласованность скелет-меш-анимация) — как и для
+  скелета/меша.
+- Что Source-модели приходят как `MT_SKELETON_ANIM` (чтобы создавался `CKinematicsAnimated`);
+  иначе анимации не подхватятся (тип скелетного визуала).
+- Текстуры/материалы — отложено.

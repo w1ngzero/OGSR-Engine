@@ -7,6 +7,8 @@
 #include "AnimationKeyCalculate.h"
 #include "SkeletonX.h"
 #include "../../xr_3da/fmesh.h"
+#include "../../xr_3da/source_mdl/source_mdl_import.h" // TryImportSourceAnimations
+#include "../../xrCore/fs_internal.h" // CTempReader
 
 #ifdef DEBUG
 #include "../../xrcore/dump_string.h"
@@ -746,7 +748,29 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
         }
     }
 
-    if (omfs.size())
+    if (m_source_imported)
+    {
+        // Source .MDL-модель: анимации не лежат в .omf/.ogf, а берутся из сопутствующего .mdl.
+        // Декодируем их и сериализуем в поток OMF, который читает стандартный загрузчик
+        // (общая проверка см. VERIFICATION.md Раунд 15). Итог не требует правок формата движка.
+        std::vector<std::uint8_t> omf;
+        if (!SourceMdl::TryImportSourceAnimations(N, bones, omf))
+            Msg("!! [SourceAnimations] failed to build motion stream for '%s'", N);
+
+        m_Motions.emplace_back();
+        if (!omf.empty())
+        {
+            CTempReader* R = xr_new<CTempReader>(omf.data(), omf.size(), 0);
+            string_path key;
+            xr_strcpy(key, sizeof(key), N);
+            xr_strcat(key, ":source");
+            const bool ok = m_Motions.back().motions.create(shared_str(key), R, bones);
+            xr_delete(R);
+            if (!ok)
+                Msg("!! [SourceAnimations] could not create motion slot for '%s'", N);
+        }
+    }
+    else if (omfs.size())
     {
         // R_ASSERT( omfs.size() < MAX_ANIM_SLOT );
         m_Motions.reserve(omfs.size());

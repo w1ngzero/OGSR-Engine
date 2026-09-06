@@ -14,8 +14,10 @@
 //   типом по-костного канала (RAW против COMPRESSED), ПОДЛЕЖАТ ВЕРИФИКАЦИИ на реальном .mdl
 //   (см. README, Раунд 4). Ошибки/неподдерживаемые случаи возвращаются явным enum'ом.
 //
-//   Поддерживаемый сейчас по-костный формат: STUDIO_ANIM_RAW (простая распаковка по кадрам).
-//   Сжатые каналы (STUDIO_ANIM_COMPRESSED / события / IK) возвращают EAnimResult::Unsupported.
+//   Поддерживаемые по-костные форматы: STUDIO_ANIM_RAW (RAWPOS/RAWROT/RAWROT2, неварьируемые) и
+//   СЖАТЫЕ RLE-каналы ANIMPOS/ANIMROT (mstudioanimvalue_t, через mstudioanim_valueptr_t).
+//   Оба верифицированы на реальных моделях (gfl2_asteria_arms / v_knife / v_akilo47, Раунд 13).
+//   События/IK возвращают EAnimResult::Unsupported.
 //--------------------------------------------------------------------------------------------------
 #include "source_mdl_anim_q.h"
 #include <cstdint>

@@ -382,7 +382,34 @@ void CKinematics::Load(const char* N, IReader* data, const u32 dwFlags)
     }
     else
     {
-        R_ASSERT2(has_ogf_bones, "Model has no X-Ray skeleton (OGF_S_BONE_NAMES) and Source skeleton import is off or failed.");
+        // No X-Ray skeleton chunk (OGF_S_BONE_NAMES) AND the Source .MDL skeleton import is off,
+        // absent or failed. This used to be a fatal R_ASSERT2, which hard-crashed the session when
+        // spawning visuals like "bread_a" that carry MT_SKELETON_RIGID but ship without a bone chunk.
+        // Instead of crashing we build a single-root identity fallback skeleton so the visual loads
+        // and renders as a static (non-animated) skinned object. We log loudly so the root cause
+        // stays diagnosable; revisit if the specific case (e.g. a Source import path for the model)
+        // gets its own fix.
+        Msg("!! [SourceSkeleton] '%s': no OGF_S_BONE_NAMES and Source skeleton import off/failed - "
+            "using single-root fallback skeleton (static, non-animated).", N);
+
+        bone_map_N.clear();
+        bone_map_N.reserve(1);
+
+        CBoneData* root = CreateBoneData(0);
+        string256 fb_name;
+        xr_strcpy(fb_name, N);
+        _strlwr(fb_name);
+        root->name = shared_str((const char*)fb_name);
+        root->child_faces.resize(children.size());
+        root->SetParentID(BI_NONE);
+        root->bind_transform.identity();
+        bones->push_back(root);
+
+        bone_map_N.emplace(root->name, (u16)0);
+        iRoot = 0;
+        visimask.set(0, true);
+
+        root->CalculateM2B(Fidentity); // m2b = inverse(bind) = identity
     }
 
     // _CollectBoneFaces (via CSkeletonX_ST/PM::AfterLoad) does child_faces[child_idx].push_back(...)
@@ -446,6 +473,7 @@ bool CKinematics::LoadSourceSkeleton(const char* N)
         visimask.set(static_cast<u16>(i), true); // keep every imported bone visible for rendering
     }
 
+    m_source_imported = true; // сигнал для CKinematicsAnimated::Load (подхватить анимации из .mdl)
     return true;
 }
 

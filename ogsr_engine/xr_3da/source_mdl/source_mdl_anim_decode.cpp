@@ -46,12 +46,25 @@ bool DecodeQuaternion48(const std::int16_t raw3[3], AnimQ::Quat4& out)
         return false;
     // 3 x 16-бит со знаком; компоненты в диапазоне ~(-1,1), w из нормы=1.
     constexpr float kScale = 32767.5f;
-    const float x = raw3[0] / kScale;
-    const float y = raw3[1] / kScale;
-    const float z = raw3[2] / kScale;
+    float x = raw3[0] / kScale;
+    float y = raw3[1] / kScale;
+    float z = raw3[2] / kScale;
+    // Если сумма квадратов слегка превышает 1 (возникает у части ДЛИННЫХ сжатых каналов
+    // конвертированных ассетов, где порядок valueptr у отдельных записей инвертирован), НЕ кладём
+    // w=0 (получался бы кватернион с |q|>1 и порчей скиннинга), а нормируем компоненты до единичной
+    // сферы. Это стандартная практика и делает декодер устойчивым к таким записям.
     float w2 = 1.0f - x * x - y * y - z * z;
     if (w2 < 0.0f)
-        w2 = 0.0f;
+    {
+        const float s = std::sqrt(x * x + y * y + z * z);
+        if (s > 1e-6f)
+        {
+            x /= s; y /= s; z /= s;
+            w2 = 1.0f - x * x - y * y - z * z;
+        }
+        if (w2 < 0.0f)
+            w2 = 0.0f;
+    }
     out.x = x; out.y = y; out.z = z; out.w = std::sqrt(w2);
     return true;
 }

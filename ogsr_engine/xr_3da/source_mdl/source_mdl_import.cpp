@@ -11,6 +11,8 @@
 #include "source_mdl_split_mesh.h"
 #include "source_mdl_mesh_to_xray.h"
 #include "source_mdl_mesh.h"
+#include "source_mdl_anim.h" // ReadSourceAnims / ANIM_SEQ
+#include "source_mdl_anim_to_xray.h" // BuildXRayMotionsOMF
 #include "../fmesh.h" // OGF_* / ogf_header / MT_SKELETON_GEOMDEF_ST / OGF_VERTEXFORMAT_FVF_4L
 
 namespace SourceMdl
@@ -290,6 +292,53 @@ bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureNa
     PutChunk(outBytes, OGF_TEXTURE, texPayload);
     PutChunk(outBytes, OGF_VERTICES, vertsPayload);
     PutChunk(outBytes, OGF_INDICES, idxPayload);
+    return true;
+}
+
+bool TryImportSourceAnimations(const char* modelName, const vecBones* bones,
+                               std::vector<std::uint8_t>& outOmfBytes)
+{
+    outOmfBytes.clear();
+
+    if (!psSourceSkeletonMode || !bones || bones->empty())
+        return false;
+
+    // Companion path: "<model>.mdl" (тот же, что и для скелета).
+    string_path mdl_path;
+    xr_strcpy(mdl_path, sizeof(mdl_path), modelName);
+    if (strext(mdl_path))
+        *strext(mdl_path) = 0;
+    xr_strcat(mdl_path, ".mdl");
+
+    string_path mdl_fs_path;
+    if (!FS.exist(mdl_fs_path, fsgame::game_meshes, mdl_path))
+    {
+        Msg("!! [SourceAnimations] no companion .mdl for '%s' (looked for '%s')", modelName, mdl_path);
+        return false;
+    }
+
+    IReader* R = FS.r_open(fsgame::game_meshes, mdl_path);
+    if (!R)
+        return false;
+
+    std::vector<ANIM_SEQ> seqs;
+    EAnimResult r = ReadSourceAnims(R->pointer(), R->length(), seqs, V49AnimLayout100(),
+                                    static_cast<int>(bones->size()));
+    FS.r_close(R);
+
+    if (r != EAnimResult::Ok)
+    {
+        Msg("!! [SourceAnimations] couldn't read animations from '%s': %s", mdl_path, AnimResultName(r));
+        return false;
+    }
+
+    if (!BuildXRayMotionsOMF(seqs, bones, outOmfBytes))
+    {
+        Msg("!! [SourceAnimations] could not serialize motion stream for '%s'", mdl_path);
+        return false;
+    }
+
+    Msg("[SourceAnimations] imported %zu sequence(s) from '%s' (%zu bytes)", seqs.size(), mdl_path, outOmfBytes.size());
     return true;
 }
 } // namespace SourceMdl

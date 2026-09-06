@@ -29,4 +29,17 @@ bool BuildXRayMotion(const ANIM_TRACK& track, CMotion& motion, bool doRotation =
 //   outMotions   -- вектор CMotion (индекс == индекс кости); ожидается, что уже resized
 //   seq          -- разобранная последовательность
 int BuildXRayMotions(const ANIM_SEQ& seq, std::vector<CMotion>& outMotions, bool useT16 = true);
+
+// Сериализует декодированные Source-последовательности в байты движкового OMF
+// (chunks OGF_S_SMPARAMS + OGF_S_MOTIONS, формат motions_value::load()).
+// Поток отдаётся стандартному загрузчику shared_motions::create(key, CTempReader(байты), bones),
+// который сам собирает partitions/CMotionDef/per-bone CMotion. Это обходит приватные поля
+// CMotionDef и reuses проверенную загрузку.
+//   seqs       -- декодированные последовательности (source_mdl_anim.h)
+//   bones      -- движковые кости (для имён/сопоставления индексов)
+//   outBytes   -- получаемые байты OMF
+//   useT16     -- 16-битная квантизация смещений
+//   ВАЖНО: движковая интеграция; итоговое положение костей/поток кадров проверяется on-screen.
+bool BuildXRayMotionsOMF(const std::vector<ANIM_SEQ>& seqs, const vecBones* bones,
+                         std::vector<std::uint8_t>& outBytes, bool useT16 = true);
 } // namespace SourceMdl

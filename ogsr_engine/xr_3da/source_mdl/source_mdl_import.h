@@ -59,4 +59,12 @@ bool TryImportSourceMesh(const char* modelName, SourceMeshImport& out);
 //!   caution, a null shader can break rendering). Returns false on empty geometry.
 bool BuildSourceMeshOGFStream(const SourceMeshImport& imp, const char* textureName, const char* shaderName,
                               std::vector<std::uint8_t>& outBytes);
+
+// ---- Round-15: engine-side animation import ----
+//! Try to decode the Source animations for `modelName` (companion .mdl) and serialize them as a
+//! motion stream (OMF bytes) that the standard shared_motions::create(key, CTempReader(bytes),
+//! bones) can load. Reuses BuildXRayMotionsOMF (см. source_mdl_anim_to_xray.h). Returns false if
+//! there is no companion .mdl, no sequences, or the bytes are empty. Requires psSourceSkeletonMode.
+bool TryImportSourceAnimations(const char* modelName, const vecBones* bones,
+                               std::vector<std::uint8_t>& outOmfBytes);
 } // namespace SourceMdl
